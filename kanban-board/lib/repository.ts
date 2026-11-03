@@ -88,6 +88,12 @@ export type PgOptions = RepoOptions & {
   /** 표를 만들 스키마 이름. 기본은 public. 시험이나 한 DB를 나눠 쓸 때 사용 */
   schema?: string;
   poolSize?: number;
+  /** DB 안에서 연결을 구분하는 이름 (pg_stat_activity에서 보인다) */
+  applicationName?: string;
+  /** 멈춤 방지 제한 시간(밀리초). 기본: 쿼리 30초, 잠금 대기 15초, 트랜잭션 열어 두고 멈춤 60초 */
+  timeouts?: { statementMs?: number; lockMs?: number; idleTxMs?: number };
+  /** 연결이 모두 사용 중일 때 기다리는 최대 시간(밀리초). 기본 15초 */
+  connectionTimeoutMs?: number;
 };
 
 const TABLE: Record<Kind, string> = {
@@ -116,8 +122,16 @@ function toPg(sql: string): string {
   return out;
 }
 
+const NUL_MSG = '쓸 수 없는 문자가 들어 있어요.';
+/** PostgreSQL은 글자 안의 NUL(\u0000)을 저장하지 못하므로 미리 거부한다 */
+function noNul(v: string): string {
+  if (v.includes('\u0000')) throw new AppError('INVALID', NUL_MSG);
+  return v;
+}
+
 function cleanName(raw: unknown, max: number, label: string): string {
   if (typeof raw !== 'string') throw new AppError('INVALID', `${label}을(를) 입력해 주세요.`);
+  noNul(raw);
   const v = raw.trim();
   if (!v) throw new AppError('INVALID', `${label}을(를) 입력해 주세요.`);
   if ([...v].length > max) throw new AppError('INVALID', `${label}은(는) ${max}자까지 쓸 수 있어요.`);
@@ -132,6 +146,22 @@ function cleanDate(raw: unknown): string | null {
 const REPEATS: Repeat[] = ['none', 'daily', 'weekly', 'monthly'];
 const NOTIFY: NotifyKind[] = ['dayBefore', 'today', 'overdue'];
 const SCHEMA_RE = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/** DB 연결·시간 초과 오류를 화면에 보여줄 수 있는 안내(503)로 바꾼다. 그 밖의 오류는 그대로 둔다. */
+function dbError(e: unknown): unknown {
+  if (e instanceof AppError) return e;
+  const err = e as { code?: string; message?: string };
+  const code = err?.code ?? '';
+  const msg = String(err?.message ?? '');
+  if (code === '55P03' || code === '57014') {
+    return new AppError('DB_BUSY', 'DB가 바쁘거나 응답이 없어요. 잠시 뒤 다시 시도해 주세요.', 503);
+  }
+  const connCodes = ['57P01', '57P02', '57P03', '08000', '08001', '08003', '08004', '08006', '25P03', '53300', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND'];
+  if (connCodes.includes(code) || /Connection terminated|Cannot use a pool after|connection is closed|connection error|timeout exceeded when trying to connect/i.test(msg)) {
+    return new AppError('DB_CONNECT', 'DB 연결이 끊겼어요. 잠시 뒤 다시 시도해 주세요. 계속되면 PostgreSQL이 켜져 있는지 확인해 주세요.', 503);
+  }
+  return e;
+}
 
 const MAX_BULK = 5000;
 function capIds(ids: string[]) {
@@ -177,13 +207,26 @@ const DDL = `
   CREATE TABLE IF NOT EXISTS changes (
     revision integer NOT NULL, kind text NOT NULL, entity_id text NOT NULL, action text NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_columns_board ON board_columns(board_id);
-  CREATE INDEX IF NOT EXISTS idx_cards_column ON cards(column_id);
-  CREATE INDEX IF NOT EXISTS idx_checks_card ON check_items(card_id);
-  CREATE INDEX IF NOT EXISTS idx_comments_card ON comments(card_id);
-  CREATE INDEX IF NOT EXISTS idx_att_card ON attachments(card_id);
-  CREATE INDEX IF NOT EXISTS idx_changes_rev ON changes(revision);
 `;
+
+/**
+ * 인덱스는 이미 있으면 건드리지 않는다.
+ * (CREATE INDEX IF NOT EXISTS는 인덱스가 있어도 "표의 소유자"만 실행할 수 있어서,
+ *  백업을 다른 계정으로 복원하는 등 표 주인이 달라진 경우 앱이 시작하지 못하게 되기 때문이다)
+ */
+const INDEXES: [string, string][] = [
+  ['idx_columns_board', 'board_columns(board_id)'],
+  ['idx_cards_column', 'cards(column_id)'],
+  ['idx_checks_card', 'check_items(card_id)'],
+  ['idx_comments_card', 'comments(card_id)'],
+  ['idx_att_card', 'attachments(card_id)'],
+  ['idx_changes_rev', 'changes(revision)'],
+];
+const INDEX_DDL = `DO $$ BEGIN
+${INDEXES.map(
+  ([name, on]) => `  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = '${name}') THEN CREATE INDEX ${name} ON ${on}; END IF;`,
+).join('\n')}
+END $$;`;
 
 export class PgBoardRepository implements BoardRepository {
   /** 지금 실행 중인 트랜잭션(있으면 모든 질의가 그 연결로 간다) */
@@ -210,14 +253,25 @@ export class PgBoardRepository implements BoardRepository {
     if (!SCHEMA_RE.test(schema)) throw new AppError('CONFIG', `스키마 이름이 올바르지 않아요: ${schema}`, 500);
     if (schema !== 'public') {
       const admin = new Pool({ connectionString: opts.connectionString, max: 1 });
+      admin.on('error', () => {});
       try {
         await admin.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
       } finally {
         await admin.end();
       }
     }
-    const pool = new Pool({ connectionString: opts.connectionString, max: opts.poolSize ?? 8, options: `-c search_path=${schema}` });
+    const t = { statementMs: 30_000, lockMs: 15_000, idleTxMs: 60_000, ...opts.timeouts };
+    const pool = new Pool({
+      connectionString: opts.connectionString,
+      max: opts.poolSize ?? 8,
+      connectionTimeoutMillis: opts.connectionTimeoutMs ?? 15_000, // 연결이 바닥나도 영원히 기다리지 않는다
+      application_name: opts.applicationName ?? `kanban-${schema}`,
+      // 한 곳이 막혀도 앱 전체가 영원히 멈추지 않게 제한 시간을 둔다
+      options: `-c search_path=${schema} -c statement_timeout=${t.statementMs} -c lock_timeout=${t.lockMs} -c idle_in_transaction_session_timeout=${t.idleTxMs}`,
+    });
     pool.on('error', (e) => console.error('DB 연결 오류(놀고 있던 연결)', e.message));
+    // 작업 중인 연결이 끊길 때도 오류 이벤트를 받아 두어야 앱이 갑자기 죽지 않는다
+    pool.on('connect', (client) => client.on('error', (e) => console.error('DB 연결 오류(사용 중이던 연결)', e.message)));
     const repo = new PgBoardRepository(pool, opts, schema);
     try {
       await repo.init();
@@ -245,6 +299,7 @@ export class PgBoardRepository implements BoardRepository {
       await c.query('BEGIN');
       await c.query('SELECT pg_advisory_xact_lock(7241901)'); // 서버가 동시에 시작해도 표 만들기가 겹치지 않게
       await c.query(DDL);
+      await c.query(INDEX_DDL);
       await c.query('COMMIT');
     } catch (e) {
       await c.query('ROLLBACK').catch(() => {});
@@ -260,9 +315,13 @@ export class PgBoardRepository implements BoardRepository {
 
   // ───────── 질의 도우미 ─────────
 
-  private q(text: string, params: unknown[] = []) {
+  private async q(text: string, params: unknown[] = []) {
     const exec = this.als.getStore()?.client ?? this.pool;
-    return exec.query(toPg(text), params as any[]);
+    try {
+      return await exec.query(toPg(text), params as any[]);
+    } catch (e) {
+      throw dbError(e);
+    }
   }
   private async rows<T = any>(text: string, params: unknown[] = []): Promise<T[]> {
     return (await this.q(text, params)).rows as T[];
@@ -278,7 +337,9 @@ export class PgBoardRepository implements BoardRepository {
    */
   private async write<T>(body: () => Promise<T>): Promise<T> {
     if (this.als.getStore()) return body();
-    const client = await this.pool.connect();
+    const client = await this.pool.connect().catch((e) => {
+      throw dbError(e);
+    });
     const ctx: Ctx = { client, after: [] };
     let broken = false;
     try {
@@ -300,7 +361,7 @@ export class PgBoardRepository implements BoardRepository {
       } catch {
         broken = true;
       }
-      throw e;
+      throw dbError(e);
     } finally {
       client.release(broken);
     }
@@ -309,7 +370,9 @@ export class PgBoardRepository implements BoardRepository {
   /** 읽기 여러 번을 같은 시점의 데이터로 맞춘다 */
   private async read<T>(body: () => Promise<T>): Promise<T> {
     if (this.als.getStore()) return body();
-    const client = await this.pool.connect();
+    const client = await this.pool.connect().catch((e) => {
+      throw dbError(e);
+    });
     let broken = false;
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -322,7 +385,7 @@ export class PgBoardRepository implements BoardRepository {
       } catch {
         broken = true;
       }
-      throw e;
+      throw dbError(e);
     } finally {
       client.release(broken);
     }
@@ -699,11 +762,11 @@ export class PgBoardRepository implements BoardRepository {
         if (typeof f.description !== 'string' || [...f.description].length > LIMITS.cardDescription) {
           throw new AppError('INVALID', `설명은 ${LIMITS.cardDescription}자까지 쓸 수 있어요.`);
         }
-        next.description = f.description;
+        next.description = noNul(f.description);
       }
       if (f.assignee !== undefined) {
         if (typeof f.assignee !== 'string') throw new AppError('INVALID', '담당자 형식이 올바르지 않아요.');
-        next.assignee = [...f.assignee.trim()].slice(0, 50).join('');
+        next.assignee = [...noNul(f.assignee).trim()].slice(0, 50).join('');
       }
       if (f.labels !== undefined) {
         if (!Array.isArray(f.labels) || f.labels.some((l) => !LABEL_COLORS.includes(l))) throw new AppError('INVALID', '라벨 색이 올바르지 않아요.');
@@ -982,7 +1045,10 @@ export class PgBoardRepository implements BoardRepository {
   /** 삭제 표시 후 보관 기간이 지난 첨부 기록을 지우고, 디스크에서 지울 파일 키를 돌려준다 */
   async purgeExpiredAttachments(): Promise<string[]> {
     const cutoff = this.now() - LIMITS.retentionDays * 24 * 60 * 60 * 1000;
-    return (await this.rows<{ storage_key: string }>('DELETE FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ? RETURNING storage_key', [cutoff])).map((r) => r.storage_key);
+    // 되돌리기와 겹치지 않게 다른 쓰기와 같은 줄(잠금)에 선다
+    return this.write(async () =>
+      (await this.rows<{ storage_key: string }>('DELETE FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ? RETURNING storage_key', [cutoff])).map((r) => r.storage_key),
+    );
   }
   async referencedStorageKeys(): Promise<Set<string>> {
     return new Set((await this.rows<{ storage_key: string }>('SELECT storage_key FROM attachments')).map((r) => r.storage_key));
@@ -1150,12 +1216,15 @@ export class PgBoardRepository implements BoardRepository {
 
   // ───────── 다른 탭 동기화 ─────────
 
-  async changesSince(since: number): Promise<Changes> {
+  async changesSince(rawSince: number): Promise<Changes> {
+    const since = Number.isFinite(rawSince) ? Math.trunc(rawSince) : -1; // 소수·문자 등이 와도 정수로
     return this.read(async () => {
       const revision = (await this.one<{ revision: number }>('SELECT revision FROM meta WHERE id = 1'))!.revision;
-      if (since >= revision) return { revision, upsert: [], remove: [] };
+      // 서버보다 앞선 번호(예: DB를 옛 백업으로 되돌림)는 이어받을 수 없으니 전체 데이터를 다시 받게 한다
+      if (since > revision) return { revision, full: await this.snapshot(), upsert: [], remove: [] };
+      if (since === revision) return { revision, upsert: [], remove: [] };
       const min = (await this.one<{ m: number | null }>('SELECT MIN(revision) AS m FROM changes'))!.m;
-      if (!Number.isFinite(since) || since < 0 || min === null || since < min - 1) {
+      if (since < 0 || min === null || since < min - 1) {
         return { revision, full: await this.snapshot(), upsert: [], remove: [] };
       }
       const rows = await this.rows<{ kind: string; entity_id: string }>('SELECT DISTINCT kind, entity_id FROM changes WHERE revision > ?', [since]);

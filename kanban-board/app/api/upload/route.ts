@@ -17,6 +17,7 @@ export async function POST(req: Request) {
     const cardId = typeof body?.cardId === 'string' ? body.cardId : '';
     const name = typeof body?.name === 'string' ? normalizeUploadName(body.name) : ''; // 저장될 이름 기준으로 검사한다
     const data = typeof body?.data === 'string' ? body.data : '';
+    if (name.includes('\u0000') || cardId.includes('\u0000')) throw new AppError('INVALID', '쓸 수 없는 문자가 들어 있어요.');
     if (!cardId || !name || !data) throw new AppError('INVALID', '파일 정보가 부족해요.');
     // 서버에서도 개수·크기를 검사한다 (화면 검사에만 기대지 않는다)
     if (data.length > Math.ceil((LIMITS.fileBytes * 4) / 3) + 8) throw new AppError('INVALID_FILE', '파일은 10MB까지 올릴 수 있어요.');

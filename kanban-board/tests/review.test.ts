@@ -185,8 +185,8 @@ describe('독립 검토 5: 담당자 이름 자르기·일괄 작업 크기 제�
 
 describe('독립 검토 6: 시작 정리가 방금 올라온 파일을 고아로 오해해 지우지 않는다', () => {
   it('최근에 만들어진 파일은 DB에 아직 없어도 지우지 않는다', async () => {
-    const age: Record<string, number> = { young: 5_000, old: 3_600_000 };
-    const present = new Set(['young', 'old']);
+    const age: Record<string, number> = { 'dddddddd-dddd-dddd-dddd-dddddddddddd': 5_000, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb': 3_600_000 };
+    const present = new Set(['dddddddd-dddd-dddd-dddd-dddddddddddd', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb']);
     const storage: StorageAdapter & { ageMs: (k: string) => number } = {
       async put() {},
       async read() { return Buffer.alloc(0); },
@@ -196,8 +196,8 @@ describe('독립 검토 6: 시작 정리가 방금 올라온 파일을 고아로
       ageMs: (k) => age[k],
     };
     const removed = await cleanupStorage(repo, storage);
-    expect(removed).toEqual(['old']);
-    expect([...present]).toEqual(['young']);
+    expect(removed).toEqual(['bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb']);
+    expect([...present]).toEqual(['dddddddd-dddd-dddd-dddd-dddddddddddd']);
   });
 });
 

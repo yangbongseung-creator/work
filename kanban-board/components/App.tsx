@@ -156,6 +156,11 @@ export function App() {
         if (!cur) break;
         const ch = await fetchChanges(cur.revision);
         const latest = snapRef.current;
+        if (latest && ch.full && ch.revision < latest.revision) {
+          // 서버가 내 화면보다 옛 상태다(예: DB를 백업으로 되돌림). 낡은 화면을 버리고 새로 불러온다.
+          window.location.reload();
+          return;
+        }
         if (latest && latest.revision < ch.revision) commit(applyChanges(latest, ch));
       } while (catchUpAgain.current);
     } catch {

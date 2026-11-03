@@ -147,7 +147,16 @@ nano .env
 DATABASE_URL=postgres://kanban:내비밀번호@127.0.0.1:5432/kanban
 ```
 
-> 비밀번호에 `@ : / # ?` 같은 특수문자가 있으면 연결 주소가 깨집니다. 영문과 숫자로만 정하는 게 가장 쉽습니다.
+> **비밀번호는 영문 대소문자와 숫자로만 정하세요.** (`_` `-` `.`은 써도 됩니다)
+> 아래 글자는 연결 주소를 깨뜨리거나 **조용히 잘라 버려서**, "비밀번호가 틀렸다"는 엉뚱한 오류가 나옵니다.
+>
+> | 글자 | 문제 |
+> |---|---|
+> | `$` | `.env`를 읽을 때 **그 뒤가 사라집니다** (`pa$word12` → `pa`). 가장 찾기 어려운 함정입니다 |
+> | `% @ : / # ?` | 연결 주소의 구분 글자라서 주소 해석이 깨집니다 |
+> | 공백, 따옴표 | 값이 잘리거나 따옴표까지 비밀번호로 읽힐 수 있습니다 |
+>
+> 이미 특수문자 비밀번호를 만들었다면 `ALTER USER kanban WITH PASSWORD '새비밀번호';`로 바꾸세요 (`sudo -u postgres psql`에서 실행).
 
 파일을 나만 읽도록 잠급니다.
 
@@ -238,8 +247,12 @@ tar czf /home/kanban-board/uploads-$(date +%F).tar.gz -C /home/kanban-board data
 | 증상 | 확인할 것 |
 |---|---|
 | 화면에 "DB 연결 설정이 없어요" | `.env`가 `/home/kanban-board/.env`에 있는지, `DATABASE_URL`이 적혀 있는지 |
-| `password authentication failed` | `.env`의 비밀번호가 4단계에서 정한 것과 같은지 |
-| `connection refused` | `sudo systemctl status postgresql`로 PostgreSQL이 켜져 있는지 |
+| 화면에 "사용자 이름이나 비밀번호가 틀렸어요" (`password authentication failed`) | `.env`의 사용자·비밀번호가 4단계와 같은지. 비밀번호에 `$ % @ : / #`이 있는지 |
+| 화면에 "데이터베이스 이름이 없어요" | `.env` 맨 끝의 이름(`.../kanban`)이 4단계에서 만든 이름과 같은지 |
+| 화면에 "DB 사용자에게 권한이 없어요" | 4단계에서 `CREATE DATABASE kanban OWNER kanban;`으로 만들었는지 |
+| 화면에 "PostgreSQL에 닿지 못했어요" | PostgreSQL이 켜져 있는지, `.env`의 주소·포트가 맞는지 |
+| 화면에 "DB가 바쁘거나 응답이 없어요" | 잠시 뒤 다시 시도. 계속되면 PostgreSQL을 재시작(`sudo systemctl restart postgresql`) |
+| `connection refused` | `sudo systemctl status postgresql`로 PostgreSQL이 켜져 있는지 (앱은 DB가 잠시 꺼졌다 켜져도 **재시작 없이** 알아서 다시 연결됩니다) |
 | `npm ci`가 실패 | Node 버전이 22인지(`node -v`), 인터넷이 되는지 |
 | 접속이 안 됨 | SSH 터널 창이 열려 있는지, 앱이 켜져 있는지(`tmux attach -t kanban`) |
 | 실시간 연결이 끊김 | 터널을 껐다 켜도 자동으로 다시 연결됩니다. 그래도 안 되면 새로고침 |

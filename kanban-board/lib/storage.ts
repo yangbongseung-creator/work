@@ -57,6 +57,9 @@ export class LocalStorageAdapter implements StorageAdapter {
   }
 }
 
+/** 앱이 만드는 저장 파일 이름: UUID, 업로드 도중에는 뒤에 .tmp */
+export const isStorageKey = (name: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.tmp)?$/i.test(name);
+
 export interface CleanupRepo {
   purgeExpiredAttachments(): Promise<string[]>;
   referencedStorageKeys(): Promise<Set<string>>;
@@ -75,11 +78,17 @@ export async function cleanupStorage(repo: CleanupRepo, storage: StorageAdapter)
   }
   const referenced = await repo.referencedStorageKeys();
   for (const key of storage.list()) {
+    // 우리가 만든 파일 이름(UUID, 업로드 중 임시 .tmp)이 아닌 것은 건드리지 않는다 (사용자가 넣어 둔 파일일 수 있다)
+    if (!isStorageKey(key)) continue;
     if (!referenced.has(key)) {
       // 방금 올라온 파일은 아직 DB에 기록되기 전일 수 있으니 건드리지 않는다
       if (storage.ageMs && storage.ageMs(key) < YOUNG_FILE_MS) continue;
-      await storage.remove(key);
-      removed.push(key);
+      try {
+        await storage.remove(key);
+        removed.push(key);
+      } catch (e) {
+        console.error('첨부 파일 정리 실패(건너뜀)', key, (e as Error).message); // 하나가 실패해도 나머지는 계속한다
+      }
     }
   }
   return removed;

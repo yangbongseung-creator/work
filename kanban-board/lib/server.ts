@@ -41,6 +41,18 @@ export function getStorage(): StorageAdapter {
   return state.storage;
 }
 
+/** 연결 실패 원인(오류 코드)별로 "무엇을 확인해야 하는지"를 알려준다. 주소·비밀번호 같은 값은 넣지 않는다. */
+export function connectHint(code?: string): string {
+  const base = 'DB에 연결하지 못했어요. ';
+  if (code === '28P01' || code === '28000') return base + '사용자 이름이나 비밀번호가 틀렸어요. .env의 DATABASE_URL을 확인해 주세요.';
+  if (code === '3D000') return base + '.env에 적은 데이터베이스 이름이 없어요. 설치 안내서 4단계에서 만든 이름과 같은지 확인해 주세요.';
+  if (code === '42501') return base + 'DB 사용자에게 권한이 없어요. 데이터베이스를 `OWNER 사용자이름`으로 만들었는지 확인해 주세요 (설치 안내서 4단계).';
+  if (code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+    return base + 'PostgreSQL에 닿지 못했어요. 켜져 있는지, .env의 주소와 포트가 맞는지 확인해 주세요.';
+  }
+  return base + '.env의 DATABASE_URL(주소·사용자·비밀번호)과 PostgreSQL이 켜져 있는지 확인해 주세요. 자세한 원인은 앱을 켠 화면(tmux)에 나와 있어요.';
+}
+
 /** DB 연결은 한 번만 만들고 모두가 나눠 쓴다. 처음 부를 때 표를 만들고 시작 정리를 한다. */
 export function getRepo(): Promise<PgBoardRepository> {
   if (!state.repo) {
@@ -63,10 +75,15 @@ export function getRepo(): Promise<PgBoardRepository> {
         // 자세한 원인은 서버 로그에만 남기고(주소·비밀번호는 찍지 않는다), 화면에는 알아보기 쉬운 안내만 보낸다
         const err = e as { code?: string; message?: string };
         console.error(`DB 연결 실패 (${err.code ?? 'unknown'}): ${err.message ?? e}`);
-        throw new AppError('DB_CONNECT', 'DB에 연결하지 못했어요. .env의 DATABASE_URL(주소·사용자·비밀번호)과 PostgreSQL이 켜져 있는지 확인해 주세요.', 503);
+        throw new AppError('DB_CONNECT', connectHint(err.code), 503);
       }
-      await repo.ensureFirstBoard();
-      await repo.purgeOrphanDismissals();
+      try {
+        await repo.ensureFirstBoard();
+        await repo.purgeOrphanDismissals();
+      } catch (e) {
+        await repo.close().catch(() => {}); // 시작에 실패하면 연결을 닫아 두고, 다음 요청에서 다시 시도한다
+        throw e;
+      }
       // 앱 시작 시 정리: 보관 기간이 지난 첨부, 어디에서도 쓰지 않는 고아 파일
       cleanupStorage(repo, storage).catch((e) => console.error('첨부 정리 실패', e));
       return repo;

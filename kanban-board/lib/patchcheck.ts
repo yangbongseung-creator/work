@@ -10,8 +10,10 @@ const bad = (): never => {
   throw new AppError('INVALID', '요청 형식이 올바르지 않아요.');
 };
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const str = (v: unknown, max: number, min = 0) => typeof v === 'string' && [...v].length <= max && [...v].length >= min;
-const int = (v: unknown, min = 0) => typeof v === 'number' && Number.isInteger(v) && v >= min;
+const str = (v: unknown, max: number, min = 0) => typeof v === 'string' && !v.includes('\u0000') && [...v].length <= max && [...v].length >= min;
+/** DB의 정수(int4) 범위 안의 값만 받는다 */
+const INT_MAX = 2_000_000_000;
+const int = (v: unknown, min = 0) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= INT_MAX;
 const uuid = (v: unknown) => typeof v === 'string' && UUID.test(v);
 
 /** 클라이언트가 보낸 되돌리기 묶음이 서버가 만든 모양과 한도에 맞는지 검사한다 (검사 없이 그대로 저장하지 않기 위해) */

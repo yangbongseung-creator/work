@@ -1,4 +1,4 @@
-import { getFeed, getRepo, guardRequest } from '../../../lib/server';
+import { errorResponse, getFeed, getRepo, guardRequest } from '../../../lib/server';
 
 export const dynamic = 'force-dynamic';
 
@@ -6,8 +6,13 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: Request) {
   const blocked = await guardRequest(req);
   if (blocked) return blocked;
-  const repo = await getRepo(); // 저장소를 먼저 열어 둔다 (연결 설정이 틀리면 여기서 알려준다)
-  const firstRevision = (await repo.snapshot()).revision;
+  let firstRevision: number;
+  try {
+    const repo = await getRepo(); // 저장소를 먼저 열어 둔다 (연결 설정이 틀리면 여기서 알려준다)
+    firstRevision = (await repo.snapshot()).revision;
+  } catch (e) {
+    return errorResponse(e);
+  }
   const enc = new TextEncoder();
   let unsubscribe = () => {};
   let ping: ReturnType<typeof setInterval> | undefined;

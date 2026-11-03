@@ -511,10 +511,10 @@ describe('첨부 파일', () => {
   });
   it('시작 시 정리: 기간 지난 파일과 DB가 모르는 고아 파일을 지운다', async () => {
     const id = await mk('a');
-    await att(id, 'live');
-    await att(id, 'old');
-    await repo.deleteAttachment((await repo.snapshot()).attachments.find((a) => a.storageKey === 'old')!.id);
-    files.add('orphan');
+    await att(id, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    await att(id, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+    await repo.deleteAttachment((await repo.snapshot()).attachments.find((a) => a.storageKey === 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')!.id);
+    files.add('cccccccc-cccc-cccc-cccc-cccccccccccc');
     const storage: StorageAdapter = {
       async put() {},
       async read() { return Buffer.alloc(0); },
@@ -524,8 +524,8 @@ describe('첨부 파일', () => {
     };
     now += 8 * DAY;
     const removed = await cleanupStorage(repo, storage);
-    expect(removed.sort()).toEqual(['old', 'orphan']);
-    expect([...files].sort()).toEqual(['live']);
+    expect(removed.sort()).toEqual(['bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'cccccccc-cccc-cccc-cccc-cccccccccccc']);
+    expect([...files].sort()).toEqual(['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa']);
   });
 });
 

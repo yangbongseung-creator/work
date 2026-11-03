@@ -12,7 +12,11 @@ export async function POST(req: Request) {
       throw new AppError('INVALID', '요청 형식이 올바르지 않아요.');
     }
     const repo = await getRepo();
-    const s = (v: unknown) => (typeof v === 'string' ? v : '');
+    const s = (v: unknown) => {
+      if (typeof v !== 'string') return '';
+      if (v.includes('\u0000')) throw new AppError('INVALID', '쓸 수 없는 문자가 들어 있어요.');
+      return v;
+    };
     const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
     const today = typeof body?.today === 'string' ? body.today : undefined;
     switch (body?.op) {
