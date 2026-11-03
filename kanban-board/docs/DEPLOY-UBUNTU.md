@@ -10,10 +10,10 @@
 
 | 구분 | 내용 |
 |---|---|
-| 앱 위치 | `/home/kanban-board/work/kanban-board` |
+| 앱 위치 | `/home/kanban-board` (앱 파일이 이 폴더 바로 아래에 놓입니다) |
 | 실행하는 사용자 | `kanban` (관리자가 아닌 전용 사용자) |
 | 데이터베이스 | 같은 서버의 PostgreSQL (`kanban` 데이터베이스) |
-| 첨부 파일 | `/home/kanban-board/work/kanban-board/data/uploads` (디스크에 저장, 앱이 처음 실행할 때 알아서 만듦) |
+| 첨부 파일 | `/home/kanban-board/data/uploads` (디스크에 저장, 앱이 처음 실행할 때 알아서 만듦) |
 | 접속 방법 | 내 PC → SSH 터널 → 서버의 `127.0.0.1:3000` |
 | 실행 방식 | 직접 실행 (`tmux`로 켜 두기) |
 
@@ -120,11 +120,17 @@ sudo -u kanban -H bash
 
 위 명령으로 `kanban` 사용자로 바뀝니다. (이후 줄은 모두 이 상태에서 실행합니다. 나가려면 `exit`)
 
+코드는 숨김 폴더 `.source`에 받아 두고, 그중 **앱 부분만** `/home/kanban-board` 바로 아래로 풀어 놓습니다.
+(GitHub 저장소 안에서 앱이 `kanban-board`라는 하위 폴더에 들어 있어서, 그냥 `git clone`만 하면 `/home/kanban-board/work/kanban-board`가 되기 때문입니다.)
+
 ```bash
 cd /home/kanban-board
-git clone --branch claude/kanban-board-stage1-2 https://github.com/yangbongseung-creator/work
-cd work/kanban-board
+git clone --depth 1 --branch claude/kanban-board-stage1-2 https://github.com/yangbongseung-creator/work .source
+git -C .source archive HEAD kanban-board | tar -x --strip-components=1 -C /home/kanban-board
+ls
 ```
+
+`ls` 결과에 `package.json`, `app`, `lib`, `docs` 등이 보이면 성공입니다. (`.env.example`은 점으로 시작해서 `ls -A`로 봐야 보입니다.)
 
 > 저장소는 공개라서 비밀번호 없이 받아집니다.
 
@@ -201,11 +207,15 @@ http://127.0.0.1:3000
 
 ```bash
 sudo -u kanban -H bash
-cd /home/kanban-board/work/kanban-board
-git pull
+cd /home/kanban-board
+git -C .source pull
+git -C .source archive HEAD kanban-board | tar -x --strip-components=1 -C /home/kanban-board
 npm ci
 npm run build
 ```
+
+`.env`, `data/`(첨부), `node_modules/`는 GitHub에 없는 파일이라 이 과정에서 지워지지 않습니다.
+(GitHub에서 삭제된 옛 파일은 남아 있을 수 있지만 동작에는 영향이 없습니다.)
 
 그다음 tmux 안의 앱을 `Ctrl+C`로 끄고 `npm start`로 다시 켭니다.
 
@@ -218,7 +228,7 @@ npm run build
 pg_dump -h 127.0.0.1 -U kanban kanban > /home/kanban-board/backup-$(date +%F).sql
 
 # 2) 첨부 파일
-tar czf /home/kanban-board/uploads-$(date +%F).tar.gz -C /home/kanban-board/work/kanban-board data/uploads
+tar czf /home/kanban-board/uploads-$(date +%F).tar.gz -C /home/kanban-board data/uploads
 ```
 
 복원은 `psql -h 127.0.0.1 -U kanban kanban < backup-날짜.sql` 입니다. 백업 파일은 **다른 곳(내 PC 등)에도 복사해 두세요.** 서버 디스크가 고장 나면 같이 사라집니다.
@@ -227,7 +237,7 @@ tar czf /home/kanban-board/uploads-$(date +%F).tar.gz -C /home/kanban-board/work
 
 | 증상 | 확인할 것 |
 |---|---|
-| 화면에 "DB 연결 설정이 없어요" | `.env`가 앱 폴더(`work/kanban-board`)에 있는지, `DATABASE_URL`이 적혀 있는지 |
+| 화면에 "DB 연결 설정이 없어요" | `.env`가 `/home/kanban-board/.env`에 있는지, `DATABASE_URL`이 적혀 있는지 |
 | `password authentication failed` | `.env`의 비밀번호가 4단계에서 정한 것과 같은지 |
 | `connection refused` | `sudo systemctl status postgresql`로 PostgreSQL이 켜져 있는지 |
 | `npm ci`가 실패 | Node 버전이 22인지(`node -v`), 인터넷이 되는지 |
