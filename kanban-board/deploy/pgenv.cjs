@@ -22,7 +22,7 @@ let u;
 try {
   u = new URL(raw);
 } catch {
-  console.error('.env의 DATABASE_URL 모양이 올바르지 않아요. postgres://사용자:비밀번호@127.0.0.1:5432/kanban 모양이어야 해요.');
+  console.error('.env의 DATABASE_URL 모양이 올바르지 않아요. postgres://kanban:비밀번호@127.0.0.1:5432/kanbandb 모양이어야 해요.');
   process.exit(1);
 }
 const quote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;

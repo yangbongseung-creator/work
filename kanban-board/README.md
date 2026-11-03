@@ -31,7 +31,7 @@
 | 단계 | 내용 |
 |---|---|
 | 1 | `git`, `curl`, `tmux`, `postgresql`, Node.js 22(22.12 이상) 설치 |
-| 2 | 전용 사용자 `kanban` 만들기, PostgreSQL에 `kanban` 사용자와 데이터베이스 만들기 |
+| 2 | 전용 사용자 `kanban` 만들기, PostgreSQL에 DB 사용자 `kanban`과 데이터베이스 `kanbandb`(주인: `kanban`) 만들기 |
 | 3 | 코드 받기 → `.env`에 `DATABASE_URL` 채우기 |
 | 4 | `npm ci && npm run build` → `bash ~/deploy/start.sh` |
 | 5 | 내 PC에서 `ssh -L 3000:127.0.0.1:3000 ...` 로 터널을 열고 `http://127.0.0.1:3000` 접속 |

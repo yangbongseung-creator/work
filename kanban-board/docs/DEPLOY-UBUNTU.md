@@ -10,7 +10,7 @@
 |---|---|
 | 앱 위치 | `/home/kanban-board` (앱 파일이 이 폴더 바로 아래에 놓입니다) |
 | 실행하는 사용자 | `kanban` (관리자가 아닌 전용 사용자) |
-| 데이터베이스 | 같은 서버의 PostgreSQL (`kanban` 데이터베이스) |
+| 데이터베이스 | 같은 서버의 PostgreSQL — 데이터베이스 이름 `kanbandb`, DB 사용자 `kanban` |
 | 첨부 파일 | `/home/kanban-board/data/uploads` (앱이 처음 쓸 때 알아서 만듦) |
 | 접속 방법 | 내 PC → SSH 터널 → 서버의 `127.0.0.1:3000` |
 | 켜고 끄기 | `bash ~/deploy/start.sh` / `bash ~/deploy/stop.sh` (tmux 안에서 계속 돌게 해 줌) |
@@ -197,8 +197,10 @@ CREATE USER kanban;
 `Enter new password`가 나오면 정한 비밀번호를 입력하고 Enter, 한 번 더 입력하고 Enter. (입력해도 화면에 글자가 보이지 않는 것이 정상입니다. 이 방법은 비밀번호가 기록에 남지 않습니다.)
 
 ```sql
-CREATE DATABASE kanban OWNER kanban;
+CREATE DATABASE kanbandb OWNER kanban;
 ```
+
+(`OWNER kanban`이 꼭 있어야 합니다. 빠지면 앱이 표를 만들지 못해 "DB 사용자에게 권한이 없어요"가 나옵니다.)
 
 ```sql
 \q
@@ -207,10 +209,26 @@ CREATE DATABASE kanban OWNER kanban;
 연결 확인 (비밀번호를 물으면 방금 정한 비밀번호):
 
 ```bash
-psql -h 127.0.0.1 -U kanban -d kanban -c "select 'DB 연결 OK' as 결과;"
+psql -h 127.0.0.1 -U kanban -d kanbandb -c "select 'DB 연결 OK' as 결과;"
 ```
 
 `DB 연결 OK`가 나오면 성공입니다.
+
+> **사용자 `kanban`이나 데이터베이스 `kanbandb`를 이미 만들어 두었다면** — 위 명령에서 `already exists`(이미 있음)가 나와도 괜찮습니다. 대신 아래 두 가지만 확인하세요.
+>
+> 1. 데이터베이스의 주인이 `kanban`인지:
+>
+>    ```bash
+>    sudo -u postgres psql -c "\l kanbandb"
+>    ```
+>
+>    `Owner` 칸이 `kanban`이 아니면 (예: `postgres`) 주인을 바꿉니다:
+>
+>    ```bash
+>    sudo -u postgres psql -c "ALTER DATABASE kanbandb OWNER TO kanban;"
+>    ```
+>
+> 2. 비밀번호가 기억나지 않으면: `sudo -u postgres psql` → `\password kanban` → `\q` 로 새로 정합니다.
 
 ## 5단계. 코드 받기 (kanban)
 
@@ -262,7 +280,7 @@ nano .env
 다 바꾸면 그 줄이 **이런 모양**이어야 합니다 (명령어가 아니라 파일 안의 내용입니다):
 
 ```
-DATABASE_URL=postgres://kanban:Abc123xyz789Qwe45@127.0.0.1:5432/kanban
+DATABASE_URL=postgres://kanban:Abc123xyz789Qwe45@127.0.0.1:5432/kanbandb
 ```
 
 저장은 `Ctrl+O` → `Enter`, 나가기는 `Ctrl+X`. 그다음 파일을 나만 읽도록 잠급니다.
@@ -466,8 +484,8 @@ bash ~/deploy/start.sh
 | start.sh: "3000번 포트를 다른 프로그램이 쓰고 있어요" | 예전 방식으로 켠 앱이 남아 있을 수 있어요. [예전 설치 정리](#업데이트하는-방법)를 보세요. 확인: 관리자 상태에서 `sudo ss -tlnp \| grep :3000` |
 | "DB 연결 설정이 없어요" | `.env`가 `/home/kanban-board/.env`에 있는지, `DATABASE_URL` 줄 맨 앞에 `#`이 없는지 |
 | "사용자 이름이나 비밀번호가 틀렸어요" | `.env`의 비밀번호가 4단계와 같은지, 금지 글자(`$ # % @ : / ?`)가 있는지. 비밀번호를 새로 정하려면 관리자 상태에서 `sudo -u postgres psql` → `\password kanban` → `.env`도 같게 고친 뒤 껐다 켜기 |
-| "데이터베이스 이름이 없어요" | `.env` 맨 끝의 이름(`…/kanban`)이 4단계에서 만든 이름과 같은지 |
-| "DB 사용자에게 권한이 없어요" | 4단계에서 `CREATE DATABASE kanban OWNER kanban;`으로 만들었는지 |
+| "데이터베이스 이름이 없어요" | `.env` 맨 끝의 이름(`…/kanbandb`)이 4단계에서 만든 데이터베이스 이름과 같은지 |
+| "DB 사용자에게 권한이 없어요" | 데이터베이스 주인이 `kanban`인지. 관리자 상태에서 `sudo -u postgres psql -c "ALTER DATABASE kanbandb OWNER TO kanban;"` 후 앱을 껐다 켜기 |
 | "PostgreSQL에 닿지 못했어요" / `connection refused` | 관리자 상태에서 `pg_lsclusters`로 `online`인지, `.env`의 포트가 맞는지. 앱은 DB가 잠시 꺼졌다 켜져도 **재시작 없이** 다시 연결됩니다 |
 | "DB가 바쁘거나 응답이 없어요" | 잠시 뒤 다시 시도. 계속되면 관리자 상태에서 `sudo systemctl restart postgresql` |
 | 여기에 없는 처음 보는 오류 | 화면의 문구와 `tmux attach -t kanban`의 마지막 부분을 알려 주세요 (비밀번호는 빼고) |
