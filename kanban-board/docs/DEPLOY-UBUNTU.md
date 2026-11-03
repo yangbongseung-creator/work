@@ -13,7 +13,7 @@
 | 앱 위치 | `/home/kanban-board/work/kanban-board` |
 | 실행하는 사용자 | `kanban` (관리자가 아닌 전용 사용자) |
 | 데이터베이스 | 같은 서버의 PostgreSQL (`kanban` 데이터베이스) |
-| 첨부 파일 | `/home/kanban-board/data/uploads` (디스크에 저장) |
+| 첨부 파일 | `/home/kanban-board/work/kanban-board/data/uploads` (디스크에 저장, 앱이 처음 실행할 때 알아서 만듦) |
 | 접속 방법 | 내 PC → SSH 터널 → 서버의 `127.0.0.1:3000` |
 | 실행 방식 | 직접 실행 (`tmux`로 켜 두기) |
 
