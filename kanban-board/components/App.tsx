@@ -210,57 +210,147 @@ export function App() {
   const hasSnap = snap !== null;
   useEffect(() => {
     if (!hasSnap) return;
-    let es: EventSource | null = null;
+    // 브라우저는 주소 하나에 동시 연결을 6개까지만 연다. 탭마다 실시간 연결을 붙잡으면 탭 6개부터 앱이 멈춘다.
+    // 그래서 실시간 연결은 "대표 탭" 하나만 맺고, 받은 소식을 같은 브라우저의 다른 탭에 나눠 준다.
+    // 대표 탭이 닫히면 기다리던 다른 탭이 자동으로 대표를 이어받는다 (Web Locks).
     let stopped = false;
-    let lastMsg = Date.now();
+    let es: EventSource | null = null;
+    let up = false; // 대표 탭의 실시간 연결이 지금 살아 있는지
+    let heardUp = false; // 다른 탭: 대표 탭이 연결됐다고 알려 왔는지
+    let lastMsg = Date.now(); // 대표: 서버 신호를 마지막으로 받은 때 / 다른 탭: 대표 소식을 마지막으로 받은 때
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let leaderTimer: ReturnType<typeof setInterval> | null = null;
+    const abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('kanban:sync') : null;
+    const locks = (navigator as Navigator & { locks?: { request: (name: string, opts: { signal?: AbortSignal }, cb: () => Promise<void>) => Promise<unknown> } }).locks;
+    const shared = !!(bc && locks?.request);
+    const tell = (m: Record<string, unknown>) => {
+      try {
+        bc?.postMessage(m);
+      } catch {
+        /* 탭끼리 소식을 못 나눠도 각 탭은 아래의 주기 확인으로 따라온다 */
+      }
+    };
+    const onChange = (rev: number) => {
+      // 내가 보낸 변경이 돌아온 것(이미 반영된 번호)은 무시한다
+      if (Number.isFinite(rev) && baseRef.current && rev > baseRef.current.revision) catchUp();
+    };
 
-    const connect = () => {
-      if (stopped) return;
-      es?.close();
-      const src = new EventSource('/api/events');
-      es = src;
-      lastMsg = Date.now();
-      src.onopen = () => {
+    const lead = () => {
+      const connect = () => {
+        if (stopped) return;
+        es?.close();
+        const src = new EventSource('/api/events');
+        es = src;
         lastMsg = Date.now();
-        setConn('connected');
-        catchUp(); // 끊긴 동안 놓친 변경을 마지막 번호 이후로 가져온다
+        src.onopen = () => {
+          lastMsg = Date.now();
+          up = true;
+          setConn('connected');
+          tell({ t: 'up' });
+          catchUp(); // 끊긴 동안 놓친 변경을 마지막 번호 이후로 가져온다
+        };
+        src.addEventListener('ping', () => {
+          lastMsg = Date.now();
+          tell({ t: up ? 'up' : 'down' });
+        });
+        src.addEventListener('change', (ev) => {
+          lastMsg = Date.now();
+          const rev = Number((ev as MessageEvent).data);
+          tell({ t: 'change', rev });
+          onChange(rev);
+        });
+        src.onerror = () => {
+          up = false;
+          setConn('reconnecting');
+          tell({ t: 'down' });
+          // 브라우저가 재시도를 포기한 경우(CLOSED)에는 직접 다시 연결한다
+          if (src.readyState === EventSource.CLOSED && !retry) {
+            retry = setTimeout(() => {
+              retry = null;
+              connect();
+            }, 2000);
+          }
+        };
       };
-      src.addEventListener('ping', () => {
+      connect();
+      // 신호가 40초 넘게 없으면 끊긴 연결로 보고 새로 붙는다
+      leaderTimer = setInterval(() => {
+        if (Date.now() - lastMsg > 40_000) {
+          up = false;
+          setConn('reconnecting');
+          tell({ t: 'down' });
+          connect();
+        }
+      }, 10_000);
+    };
+
+    if (bc) {
+      bc.onmessage = (e: MessageEvent) => {
+        const m = e.data as { t?: string; rev?: number } | null;
+        if (!m || !m.t) return;
+        if (es) {
+          // 나는 대표 탭: 새로 열린 탭이 지금 상태를 물으면 알려 준다
+          if (m.t === 'hello') tell({ t: up ? 'up' : 'down' });
+          return;
+        }
         lastMsg = Date.now();
-      });
-      src.addEventListener('change', (ev) => {
-        lastMsg = Date.now();
-        const rev = Number((ev as MessageEvent).data);
-        // 내가 보낸 변경이 돌아온 것(이미 반영된 번호)은 무시한다
-        if (Number.isFinite(rev) && baseRef.current && rev > baseRef.current.revision) catchUp();
-      });
-      src.onerror = () => {
-        setConn('reconnecting');
-        // 브라우저가 재시도를 포기한 경우(CLOSED)에는 직접 다시 연결한다
-        if (src.readyState === EventSource.CLOSED && !retry) {
-          retry = setTimeout(() => {
-            retry = null;
-            connect();
-          }, 2000);
+        if (m.t === 'change') onChange(Number(m.rev));
+        else if (m.t === 'up') {
+          if (!heardUp) {
+            heardUp = true;
+            setConn('connected');
+            catchUp(); // 연결된 직후: 놓친 변경을 가져온다
+          }
+        } else if (m.t === 'down') {
+          heardUp = false;
+          setConn('reconnecting');
         }
       };
-    };
-    connect();
+    }
 
-    // 신호가 40초 넘게 없으면 끊긴 연결로 보고 새로 붙는다
-    const watchdog = setInterval(() => {
-      if (Date.now() - lastMsg > 40_000) {
-        setConn('reconnecting');
-        connect();
-      }
-    }, 10_000);
+    let followerTimer: ReturnType<typeof setInterval> | null = null;
+    if (shared) {
+      locks!
+        .request('kanban:live', { signal: abort?.signal }, () => {
+          if (stopped) return Promise.resolve();
+          lead();
+          return new Promise<void>((resolve) => abort?.signal.addEventListener('abort', () => resolve()));
+        })
+        .catch(() => {
+          /* 탭을 닫으면 기다리던 요청이 취소된다 */
+        });
+      tell({ t: 'hello' });
+      // 대표 탭의 소식이 한동안 없으면(대표 탭이 멈췄거나 바뀌는 중) 이 탭이 직접 변경을 확인한다
+      followerTimer = setInterval(() => {
+        if (es) return;
+        if (Date.now() - lastMsg > 40_000) {
+          heardUp = false;
+          setConn('reconnecting');
+          catchUp();
+          tell({ t: 'hello' });
+        }
+      }, 10_000);
+    } else {
+      lead(); // 탭끼리 소식을 나눌 수 없는 오래된 브라우저: 탭마다 직접 연결
+    }
+
+    // 탭을 다시 볼 때 놓친 변경이 없는지 한 번 확인한다
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') catchUp();
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
       stopped = true;
-      clearInterval(watchdog);
+      document.removeEventListener('visibilitychange', onVisible);
+      if (leaderTimer) clearInterval(leaderTimer);
+      if (followerTimer) clearInterval(followerTimer);
       if (retry) clearTimeout(retry);
       es?.close();
+      es = null;
+      abort?.abort(); // 대표였다면 대표 자리를 내놓고, 기다리던 중이면 기다림을 취소한다
+      bc?.close();
     };
   }, [hasSnap, catchUp]);
 

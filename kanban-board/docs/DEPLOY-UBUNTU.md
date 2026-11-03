@@ -347,7 +347,7 @@ bash ~/deploy/start.sh
 `내계정`과 `서버주소`는 평소 서버에 SSH로 접속할 때 쓰는 값입니다 (`kanban`이 아니에요). 평소 `-p 포트`나 `-i 키파일`을 붙인다면 똑같이 붙이세요.
 
 ```bash
-ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -L 3000:127.0.0.1:3000 내계정@서버주소
+ssh -C -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -L 3000:127.0.0.1:3000 내계정@서버주소
 ```
 
 이 창을 **열어 둔 채로**, 내 PC 브라우저에서 아래 주소를 엽니다.
@@ -356,7 +356,9 @@ ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -L 3000:127.0.0.1:3000
 http://127.0.0.1:3000
 ```
 
-> PuTTY를 쓴다면: Connection → SSH → Tunnels에서 Source port `3000`, Destination `127.0.0.1:3000`, **Add** 누른 뒤 접속.
+> `-C`는 오가는 데이터를 압축해서 약 8분의 1로 줄입니다 (카드가 많아져도 느려지지 않게).
+>
+> PuTTY를 쓴다면: Connection → SSH → Tunnels에서 Source port `3000`, Destination `127.0.0.1:3000`, **Add** 누르고, Connection → SSH에서 **Enable compression**에 체크한 뒤 접속.
 
 | 상황 | 뜻과 해결 |
 |---|---|
@@ -367,7 +369,7 @@ http://127.0.0.1:3000
 
 **다른 포트로 접속하기** (예: 내 PC 쪽 8080)
 
-1. 내 PC: `ssh -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:3000 내계정@서버주소`
+1. 내 PC: `ssh -C -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:3000 내계정@서버주소`
 2. 서버(kanban): `nano .env`에서 `# KANBAN_ALLOWED_PORTS=3000,8080` 줄 맨 앞의 `#`과 공백을 지워 `KANBAN_ALLOWED_PORTS=3000,8080`으로 저장 → `bash ~/deploy/stop.sh` → `bash ~/deploy/start.sh`
 3. 브라우저: `http://127.0.0.1:8080`
 
