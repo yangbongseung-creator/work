@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState, type CompositionEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CompositionEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { LABEL_NAMES, type LabelColor } from '../lib/types';
 
 export function Menu(props: {
@@ -14,17 +15,60 @@ export function Menu(props: {
 }) {
   const isOpen = props.open === props.id;
   const trigger = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const { setOpen, align } = props;
+
+  // 메뉴는 화면 맨 위층(body)에 띄운다. 스크롤되는 카드 목록 안에 두면 열의 아래쪽 카드에서 메뉴가 잘린다.
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPos(null);
+      return;
+    }
+    const b = trigger.current?.getBoundingClientRect();
+    const el = pop.current;
+    if (!b || !el) return;
+    const h = el.offsetHeight;
+    const w = el.offsetWidth;
+    const below = b.bottom + 4;
+    // 아래 공간이 모자라면 위쪽으로 연다
+    const top = below + h > window.innerHeight - 8 && b.top - h - 4 >= 8 ? b.top - h - 4 : Math.max(8, Math.min(below, window.innerHeight - h - 8));
+    const left = align === 'left' ? Math.min(b.left, window.innerWidth - w - 8) : Math.max(8, b.right - w);
+    setPos({ top, left: Math.max(8, left) });
+    // 화면이 움직이면 메뉴 자리가 어긋나므로 닫는다
+    const close = (e: Event) => {
+      if (e.type === 'scroll' && e.target instanceof Node && el.contains(e.target)) return;
+      setOpen(null);
+    };
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [isOpen, align, setOpen]);
+
+  // 자리를 잡아 보이게 된 뒤 첫 항목에 초점을 둔다 (키보드로도 바로 고를 수 있게)
+  useEffect(() => {
+    if (isOpen && pos) pop.current?.querySelector<HTMLElement>('button:not([disabled])')?.focus();
+  }, [isOpen, pos]);
+
+  const closeAndReturn = () => {
+    setOpen(null);
+    trigger.current?.focus();
+  };
   return (
     <span
       className="menu"
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
-        // Esc로 메뉴를 닫고, 메뉴를 열었던 버튼으로 돌아간다
-        if (e.key === 'Escape' && isOpen) {
+        if (!isOpen) return;
+        // Esc: 메뉴를 닫고 메뉴를 열었던 버튼으로 돌아간다. Tab: 메뉴를 닫고 버튼으로 돌아간 뒤 다음 칸으로
+        if (e.key === 'Escape' || (e.key === 'Tab' && pop.current?.contains(e.target as Node))) {
+          if (e.key === 'Escape') e.preventDefault();
           e.stopPropagation();
-          props.setOpen(null);
-          trigger.current?.focus();
+          closeAndReturn();
         }
       }}
     >
@@ -33,15 +77,25 @@ export function Menu(props: {
         className="icon-btn"
         aria-label={props.label}
         aria-expanded={isOpen}
-        onClick={() => props.setOpen(isOpen ? null : props.id)}
+        onClick={() => setOpen(isOpen ? null : props.id)}
       >
         {props.icon ?? '⋯'}
       </button>
-      {isOpen && (
-        <div className={`menu-pop ${props.align === 'left' ? 'left' : ''}`} role="group" aria-label={props.label} onClick={() => props.setOpen(null)}>
-          {props.children}
-        </div>
-      )}
+      {isOpen &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={pop}
+            className="menu-pop floating"
+            role="group"
+            aria-label={props.label}
+            style={pos ? { top: pos.top, left: pos.left } : { top: 0, left: 0, visibility: 'hidden' }}
+            onClick={() => setOpen(null)}
+          >
+            {props.children}
+          </div>,
+          document.body,
+        )}
     </span>
   );
 }

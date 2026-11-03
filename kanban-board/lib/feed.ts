@@ -1,4 +1,4 @@
-/** 변경 알림 창구. 지금은 같은 서버 안에서 전달(SSE), 배포하면 Supabase Realtime으로 교체한다. */
+/** 변경 알림 창구. 지금은 한 서버 프로세스 안에서만 전달한다(SSE). 서버를 여러 대로 늘릴 때는 이 부분을 공용 알림 방식으로 갈아 끼운다. */
 export interface ChangeFeed {
   /** onShutdown은 서버가 꺼질 때 연결을 닫기 위해 호출된다 */
   subscribe(listener: (revision: number) => void, onShutdown?: () => void): () => void;

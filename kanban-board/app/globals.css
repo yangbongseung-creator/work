@@ -489,7 +489,7 @@ select {
 .lbl-btn:not(.on) { opacity: 0.6; }
 .label-picker, .chips { display: flex; gap: 6px; align-items: center; }
 .card.selected { outline: 2px solid var(--accent); }
-.sel-box { margin-right: 6px; vertical-align: middle; pointer-events: none; }
+.sel-box { width: auto; margin-right: 6px; vertical-align: middle; pointer-events: none; }
 .card-hit.no-drag { cursor: pointer; }
 .card-meta span { white-space: nowrap; }
 
@@ -568,3 +568,6 @@ hr { border: none; border-top: 1px solid var(--line); width: 100%; }
 /* 끄는 중인 카드가 들어갈 자리를 보여주는 삽입 표시 */
 .card-wrap.dragging { border-top: 3px solid var(--accent); border-radius: 4px; padding-top: 2px; }
 .card-wrap.dragging .card { border-style: dashed; }
+
+/* 화면 맨 위층에 띄우는 메뉴 (스크롤되는 목록 안에서 잘리지 않게) */
+.menu-pop.floating { position: fixed; right: auto; z-index: 60; }

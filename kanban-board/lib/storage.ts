@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { LIMITS } from './types';
 
-/** 첨부파일 저장 창구. 배포하면 Supabase Storage 구현으로 갈아 끼운다. */
+/** 첨부파일 저장 창구. 지금은 서버 디스크(data/uploads)에 저장한다. 다른 저장소를 쓰려면 이 모양대로 새로 구현해 갈아 끼운다. */
 export interface StorageAdapter {
   put(key: string, data: Buffer): Promise<void>;
   read(key: string): Promise<Buffer>;
@@ -13,7 +13,7 @@ export interface StorageAdapter {
   ageMs?(key: string): number;
 }
 
-/** 내 PC의 data/uploads 폴더에 저장 */
+/** 서버 디스크의 첨부 폴더(기본: 앱 폴더 아래 data/uploads)에 저장 */
 export class LocalStorageAdapter implements StorageAdapter {
   constructor(private dir: string) {
     fs.mkdirSync(dir, { recursive: true });
