@@ -13,10 +13,16 @@
   --late: #c62828;
   --late-bg: #fdecea;
   --ok: #1b7f3b;
+  --lbl-red: #e5484d;
+  --lbl-orange: #f76b15;
+  --lbl-yellow: #e5b800;
+  --lbl-green: #30a46c;
+  --lbl-blue: #3e63dd;
+  --lbl-purple: #8e4ec6;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #12151a;
     --panel: #1c2128;
     --side: #0d1014;
@@ -31,8 +37,30 @@
     --late: #ff8a80;
     --late-bg: #3a1f1f;
     --ok: #6fd68d;
+    color-scheme: dark;
   }
 }
+:root[data-theme='dark'] {
+    --bg: #12151a;
+    --panel: #1c2128;
+    --side: #0d1014;
+    --side-text: #d6dbe1;
+    --text: #e6e9ee;
+    --muted: #98a2b0;
+    --line: #333b46;
+    --col: #181d23;
+    --accent: #5b8def;
+    --accent-text: #0b1220;
+    --danger: #ff8a80;
+    --late: #ff8a80;
+    --late-bg: #3a1f1f;
+    --ok: #6fd68d;
+  color-scheme: dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -445,4 +473,94 @@ select {
   .modal .row {
     flex-direction: column;
   }
+}
+
+/* ───── 3~6단계에서 추가한 화면 요소 ───── */
+.lbl { display: inline-block; width: 36px; height: 8px; border-radius: 4px; }
+.lbl-red { background: var(--lbl-red); }
+.lbl-orange { background: var(--lbl-orange); }
+.lbl-yellow { background: var(--lbl-yellow); }
+.lbl-green { background: var(--lbl-green); }
+.lbl-blue { background: var(--lbl-blue); }
+.lbl-purple { background: var(--lbl-purple); }
+.card-labels { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+.lbl-btn { width: 28px; height: 20px; padding: 0; border-radius: 6px; border: 2px solid transparent; color: #fff; font-size: 12px; line-height: 1; }
+.lbl-btn.on { border-color: var(--text); }
+.lbl-btn:not(.on) { opacity: 0.6; }
+.label-picker, .chips { display: flex; gap: 6px; align-items: center; }
+.card.selected { outline: 2px solid var(--accent); }
+.sel-box { margin-right: 6px; vertical-align: middle; pointer-events: none; }
+.card-hit.no-drag { cursor: pointer; }
+.card-meta span { white-space: nowrap; }
+
+.filterbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.filterbar select, .filterbar .search { width: auto; }
+.filterbar .search { min-width: 200px; }
+.filterbar button.on, .seg button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 6px 0 0 6px; }
+.seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+button.link { background: none; border: none; color: var(--accent); padding: 2px 4px; }
+button.link.danger { color: var(--danger); }
+.inline-check, .check-opt { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.check-opt { padding: 6px 8px; }
+.check-opt input { width: auto; }
+.menu-pop.left { left: 0; right: auto; }
+.theme-select { width: auto; }
+.filter-note { flex: 0 0 100%; color: var(--muted); font-size: 12px; margin-bottom: -4px; }
+.columns { flex-wrap: nowrap; }
+.filter-note + .column { margin-left: 0; }
+
+.conn { font-size: 12px; color: var(--muted); }
+.conn.connected { color: var(--ok); }
+.conn.reconnecting { color: var(--danger); }
+.bell-btn { position: relative; font-size: 18px; }
+.badge { position: absolute; top: -4px; right: -2px; background: var(--late); color: #fff; border-radius: 10px; font-size: 11px; padding: 1px 5px; line-height: 1.2; }
+.bell-pop { min-width: 320px; max-height: 70vh; overflow-y: auto; }
+.notice { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--line); }
+.notice-main { flex: 1; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.notice-kind { font-size: 11px; font-weight: 700; }
+.k-overdue { color: var(--late); }
+.k-today { color: var(--accent); }
+.k-dayBefore { color: var(--muted); }
+.pad { padding: 8px; margin: 0; }
+.pad-btn { padding: 8px; width: 100%; text-align: left; }
+hr { border: none; border-top: 1px solid var(--line); width: 100%; }
+
+.due-view, .results { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
+.due-group h3, .results h3 { margin: 0 0 8px; font-size: 14px; }
+.due-overdue h3 { color: var(--late); }
+.due-row, .result-row { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 640px; padding: 0; margin-bottom: 8px; background: transparent; border: none; text-align: left; cursor: pointer; }
+.due-row .card, .result-row .card { flex: 1; }
+.col-name { min-width: 80px; }
+
+.bulkbar { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.3); z-index: 40; max-width: 94vw; }
+.bulkbar select { width: auto; }
+
+.archive-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.modal h4 { margin: 4px 0 8px; font-size: 13px; }
+.modal section { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.check-row { display: flex; gap: 6px; align-items: center; }
+.check-row input[type='checkbox'] { width: auto; }
+.done-text { text-decoration: line-through; color: var(--muted); }
+.comment { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.comment-body { white-space: pre-wrap; word-break: break-word; }
+.row-btns { display: flex; gap: 6px; }
+.attach-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.attach-list li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); }
+.small { font-size: 12px; }
+.modal-foot { justify-content: flex-end; }
+.modal input[type='file'] { border: none; padding-left: 0; }
+
+.topbar { flex-wrap: wrap; }
+.topbar button, .topbar .conn, .topbar .status, .filterbar button { white-space: nowrap; }
+@media (max-width: 760px) {
+  .topbar { padding: 8px; gap: 6px; }
+  .board-title { flex: 1 1 100%; font-size: 16px; }
+  .topbar .spacer { display: none; }
+  .filterbar { padding: 8px; }
+  .filterbar .search { min-width: 0; flex: 1; }
+  .bell-pop { min-width: 260px; }
 }

@@ -1,0 +1,76 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { LIMITS } from './types';
+
+/** 첨부파일 저장 창구. 배포하면 Supabase Storage 구현으로 갈아 끼운다. */
+export interface StorageAdapter {
+  put(key: string, data: Buffer): Promise<void>;
+  read(key: string): Promise<Buffer>;
+  remove(key: string): Promise<void>;
+  exists(key: string): boolean;
+  list(): string[];
+}
+
+/** 내 PC의 data/uploads 폴더에 저장 */
+export class LocalStorageAdapter implements StorageAdapter {
+  constructor(private dir: string) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  private file(key: string) {
+    if (!/^[0-9a-f-]{36}$/.test(key)) throw new Error('잘못된 저장 키');
+    return path.join(this.dir, key);
+  }
+  async put(key: string, data: Buffer) {
+    const tmp = this.file(key) + '.tmp';
+    try {
+      await fs.promises.writeFile(tmp, data);
+      await fs.promises.rename(tmp, this.file(key));
+    } catch (e) {
+      await fs.promises.rm(tmp, { force: true }); // 업로드가 끊기면 임시 파일을 지운다
+      throw e;
+    }
+  }
+  async read(key: string) {
+    return fs.promises.readFile(this.file(key));
+  }
+  async remove(key: string) {
+    await fs.promises.rm(this.file(key), { force: true });
+  }
+  exists(key: string) {
+    try {
+      return fs.existsSync(this.file(key));
+    } catch {
+      return false;
+    }
+  }
+  list() {
+    return fs.readdirSync(this.dir);
+  }
+}
+
+export interface CleanupRepo {
+  purgeExpiredAttachments(): string[];
+  referencedStorageKeys(): Set<string>;
+}
+
+/**
+ * 앱 시작 시 정리:
+ *  1) 삭제 표시 후 보관 기간(7일)이 지난 첨부를 DB와 디스크에서 지운다
+ *  2) DB 어디에서도 쓰지 않는 고아 파일(업로드 중단 등)을 지운다
+ */
+export async function cleanupStorage(repo: CleanupRepo, storage: StorageAdapter): Promise<string[]> {
+  const removed: string[] = [];
+  for (const key of repo.purgeExpiredAttachments()) {
+    await storage.remove(key);
+    removed.push(key);
+  }
+  const referenced = repo.referencedStorageKeys();
+  for (const key of storage.list()) {
+    if (!referenced.has(key)) {
+      await storage.remove(key);
+      removed.push(key);
+    }
+  }
+  return removed;
+}
+export const RETENTION_MS = LIMITS.retentionDays * 24 * 60 * 60 * 1000;

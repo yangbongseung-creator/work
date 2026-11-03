@@ -7,59 +7,40 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCorners,
-  useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
 } from '@dnd-kit/core';
-import {
-  SortableContext,
-  arrayMove,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import { arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { History } from '../lib/history';
-import { LIMITS, type Card, type Column, type Patch, type Snapshot } from '../lib/types';
-import { fetchState, mutate } from './api';
+import { NO_ASSIGNEE, emptyFilters, groupByDue, hasFilters, matchCard, type Filters } from '../lib/filter';
+import { computeNotices, NOTICE_TEXT, type Notice } from '../lib/notices';
+import { applyChanges } from '../lib/sync';
+import { LABEL_COLORS, LABEL_NAMES, LIMITS, type Card, type Column, type LabelColor, type Patch, type Snapshot } from '../lib/types';
+import { fetchChanges, fetchState, mutate, uploadFile } from './api';
+import { AddColumn, CardFace, ColumnView, noMeta, type CardMeta } from './Board';
+import { CardModal } from './CardModal';
+import { InlineEdit, Menu } from './ui';
+import { isOverdue, isTyping, localToday, store, storeSet } from './util';
+import { AllSearchResults, ArchiveModal, Bell, DueView } from './Views';
 
 type Status = 'idle' | 'saving' | 'saved' | 'error';
 type Items = Record<string, string[]>;
+type Theme = 'system' | 'light' | 'dark';
 
 const LAST_BOARD_KEY = 'kanban:lastBoard';
-
-function localToday(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-function readLast(): string | null {
-  try {
-    return localStorage.getItem(LAST_BOARD_KEY);
-  } catch {
-    return null;
-  }
-}
-function writeLast(id: string) {
-  try {
-    localStorage.setItem(LAST_BOARD_KEY, id);
-  } catch {
-    /* 저장소를 못 써도 앱은 동작한다 */
-  }
-}
-const isTyping = (t: EventTarget | null) => {
-  const el = t as HTMLElement | null;
-  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
-};
+const THEME_KEY = 'kanban:theme';
+const NOTIFY_ON_KEY = 'kanban:browserNotify';
+const NOTIFIED_KEY = 'kanban:notified';
 
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [boardId, setBoardId] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>('idle');
+  const [conn, setConn] = useState<'connecting' | 'connected' | 'reconnecting'>('connecting');
   const [toast, setToast] = useState<string | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
   const [openCardId, setOpenCardId] = useState<string | null>(null);
@@ -67,6 +48,16 @@ export function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [renamingBoard, setRenamingBoard] = useState<string | null>(null);
   const [creatingBoard, setCreatingBoard] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [filters, setFilters] = useState<Filters>(emptyFilters);
+  const [scope, setScope] = useState<'board' | 'all'>('board');
+  const [view, setView] = useState<'kanban' | 'due'>('kanban');
+  const [showDone, setShowDone] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [theme, setTheme] = useState<Theme>('system');
+  const [today, setToday] = useState(localToday);
+  const [browserOn, setBrowserOn] = useState(false);
   const [, bump] = useState(0);
 
   const snapRef = useRef<Snapshot | null>(null);
@@ -74,7 +65,13 @@ export function App() {
   const history = useRef(new History(LIMITS.undoSteps));
   const dragOrigin = useRef<{ columnId: string; index: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const today = useMemo(localToday, []);
+  const syncing = useRef(false);
+
+  /** 새 데이터를 받으면 화면 갱신을 기다리지 않고 ref도 바로 맞춘다 (직후 코드가 최신 값을 보게) */
+  const commit = useCallback((s: Snapshot) => {
+    snapRef.current = s;
+    setSnap(s);
+  }, []);
 
   const showToast = useCallback((m: string) => {
     setToast(m);
@@ -82,11 +79,11 @@ export function App() {
     toastTimer.current = setTimeout(() => setToast(null), 5000);
   }, []);
 
-  // 처음 불러오기
+  // ───────── 불러오기 · 설정 복원 ─────────
+
   const load = useCallback(async () => {
     try {
-      const s = await fetchState();
-      setSnap(s);
+      setSnap(await fetchState());
       setLoadError(null);
     } catch (e) {
       setLoadError((e as Error).message);
@@ -94,24 +91,43 @@ export function App() {
   }, []);
   useEffect(() => {
     load();
+    const t = store(THEME_KEY);
+    if (t === 'light' || t === 'dark') setTheme(t);
+    setBrowserOn(store(NOTIFY_ON_KEY) === '1' && typeof Notification !== 'undefined' && Notification.permission === 'granted');
   }, [load]);
 
-  // 보고 있는 보드 정하기 (마지막으로 연 보드 → 없으면 첫 보드)
+  useEffect(() => {
+    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', theme);
+    storeSet(THEME_KEY, theme);
+  }, [theme]);
+
+  // 오늘 날짜는 자정이 지나거나 탭을 다시 열면 다시 계산한다
+  useEffect(() => {
+    const tick = () => setToday((prev) => (localToday() !== prev ? localToday() : prev));
+    const id = setInterval(tick, 30_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, []);
+
+  // 보고 있는 보드 정하기
+  const boards = useMemo(() => [...(snap?.boards ?? [])].sort((a, b) => a.position - b.position), [snap]);
   useEffect(() => {
     if (!snap) return;
     if (boardId && snap.boards.some((b) => b.id === boardId)) return;
-    const last = readLast();
-    const pick = snap.boards.find((b) => b.id === last) ?? snap.boards[0] ?? null;
+    const last = store(LAST_BOARD_KEY);
+    const pick = snap.boards.find((b) => b.id === last) ?? boards[0] ?? null;
     setBoardId(pick ? pick.id : null);
-  }, [snap, boardId]);
+  }, [snap, boardId, boards]);
   useEffect(() => {
-    if (boardId) writeLast(boardId);
+    if (boardId) storeSet(LAST_BOARD_KEY, boardId);
   }, [boardId]);
 
-  // 메뉴 바깥을 누르면 닫기
   useEffect(() => {
     const close = (e: MouseEvent) => {
-      // 메뉴 안쪽을 누른 경우는 메뉴 자신이 열고 닫는다
       if ((e.target as HTMLElement | null)?.closest?.('.menu')) return;
       setMenu(null);
     };
@@ -119,34 +135,126 @@ export function App() {
     return () => document.removeEventListener('click', close);
   }, []);
 
+  // ───────── 여러 탭 동기화 (SSE + 재연결 시 이어받기) ─────────
+
+  const catchUp = useCallback(async () => {
+    const cur = snapRef.current;
+    if (!cur || syncing.current) return;
+    syncing.current = true;
+    try {
+      const ch = await fetchChanges(cur.revision);
+      setSnap((prev) => (prev && prev.revision < ch.revision ? applyChanges(prev, ch) : prev));
+    } catch {
+      /* 다음 알림 때 다시 시도 */
+    } finally {
+      syncing.current = false;
+    }
+  }, []);
+  const hasSnap = snap !== null;
+  useEffect(() => {
+    if (!hasSnap) return;
+    let es: EventSource | null = null;
+    let stopped = false;
+    let lastMsg = Date.now();
+    let retry: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (stopped) return;
+      es?.close();
+      const src = new EventSource('/api/events');
+      es = src;
+      lastMsg = Date.now();
+      src.onopen = () => {
+        lastMsg = Date.now();
+        setConn('connected');
+        catchUp(); // 끊긴 동안 놓친 변경을 마지막 번호 이후로 가져온다
+      };
+      src.addEventListener('ping', () => {
+        lastMsg = Date.now();
+      });
+      src.addEventListener('change', (ev) => {
+        lastMsg = Date.now();
+        const rev = Number((ev as MessageEvent).data);
+        // 내가 보낸 변경이 돌아온 것(이미 반영된 번호)은 무시한다
+        if (Number.isFinite(rev) && snapRef.current && rev > snapRef.current.revision) catchUp();
+      });
+      src.onerror = () => {
+        setConn('reconnecting');
+        // 브라우저가 재시도를 포기한 경우(CLOSED)에는 직접 다시 연결한다
+        if (src.readyState === EventSource.CLOSED && !retry) {
+          retry = setTimeout(() => {
+            retry = null;
+            connect();
+          }, 2000);
+        }
+      };
+    };
+    connect();
+
+    // 신호가 40초 넘게 없으면 끊긴 연결로 보고 새로 붙는다
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastMsg > 40_000) {
+        setConn('reconnecting');
+        connect();
+      }
+    }, 10_000);
+
+    return () => {
+      stopped = true;
+      clearInterval(watchdog);
+      if (retry) clearTimeout(retry);
+      es?.close();
+    };
+  }, [hasSnap, catchUp]);
+
   // ───────── 서버에 변경 보내기 ─────────
 
   const run = useCallback(
     async (body: Record<string, unknown>, optimistic?: (s: Snapshot) => Snapshot): Promise<boolean> => {
       const prev = snapRef.current;
       setStatus('saving');
-      if (optimistic && prev) setSnap(optimistic(prev));
+      if (optimistic && prev) commit(optimistic(prev));
       try {
-        const res = await mutate(body);
-        setSnap(res.snapshot);
+        const res = await mutate({ ...body, today: localToday() }); // 완료한 날짜는 브라우저의 로컬 날짜
+        commit(res.snapshot);
         if (res.entry) history.current.push(res.entry);
         setStatus('saved');
         bump((n) => n + 1);
         return true;
       } catch (e) {
-        if (prev) setSnap(prev);
+        if (prev) commit(prev);
         setStatus('error');
         showToast((e as Error).message);
         return false;
       }
     },
-    [showToast],
+    [showToast, commit],
   );
 
+  const doUpload = useCallback(async (cardId: string, file: File) => {
+    setStatus('saving');
+    try {
+      const res = await uploadFile(cardId, file);
+      commit(res.snapshot);
+      if (res.entry) history.current.push(res.entry);
+      setStatus('saved');
+      bump((n) => n + 1);
+    } catch (e) {
+      setStatus('error');
+      throw e;
+    }
+  }, [commit]);
+
   const boardOfPatch = (p: Patch, s: Snapshot): string | null => {
-    if (p.upsert.boards[0]) return p.upsert.boards[0].id;
-    if (p.upsert.columns[0]) return p.upsert.columns[0].boardId;
-    if (p.upsert.cards[0]) return s.columns.find((c) => c.id === p.upsert.cards[0].columnId)?.boardId ?? null;
+    const colBoard = (colId: string) => s.columns.find((c) => c.id === colId)?.boardId ?? null;
+    for (const u of p.upsert) {
+      const r = u.row as any;
+      if (u.kind === 'board') return r.id;
+      if (u.kind === 'column') return r.boardId;
+      if (u.kind === 'card') return colBoard(r.columnId);
+      const card = s.cards.find((c) => c.id === r.cardId);
+      if (card) return colBoard(card.columnId);
+    }
     return null;
   };
 
@@ -159,16 +267,20 @@ export function App() {
       try {
         const patch = dir === 'undo' ? e.inverse : e.forward;
         const res: any = await mutate({ op: 'patch', patch, expect: e.expect });
-        setSnap(res.snapshot);
+        commit(res.snapshot);
         if (res.conflict) {
           if (dir === 'undo') h.dropUndo();
           else h.dropRedo();
-          showToast('다른 탭에서 바뀐 내용이라 이 단계는 건너뛰었어요.');
+          showToast(
+            res.reason === 'file'
+              ? '보관 기간이 지나 파일이 정리되어 복원할 수 없어요. 이 단계는 건너뛰었어요.'
+              : '다른 탭에서 바뀐 내용이라 덮어쓰지 않고 이 단계를 건너뛰었어요.',
+          );
           setStatus('idle');
         } else {
           if (dir === 'undo') h.commitUndo(res.touched);
           else h.commitRedo(res.touched);
-          const target = boardOfPatch(patch, res.snapshot);
+          const target = boardOfPatch(patch, res.snapshot as Snapshot);
           if (target && (res.snapshot as Snapshot).boards.some((b) => b.id === target)) setBoardId(target);
           setStatus('saved');
         }
@@ -178,14 +290,13 @@ export function App() {
       }
       bump((n) => n + 1);
     },
-    [showToast],
+    [showToast, commit],
   );
 
-  // Ctrl+Z / Ctrl+Shift+Z (글을 쓰는 중에는 입력창 자체 기능을 쓴다)
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== 'z') return;
-      if (isTyping(ev.target)) return;
+      if (isTyping(ev.target)) return; // 글 입력 중에는 입력창 자체의 되돌리기를 쓴다
       ev.preventDefault();
       step(ev.shiftKey ? 'redo' : 'undo');
     };
@@ -195,28 +306,128 @@ export function App() {
 
   // ───────── 화면용 데이터 ─────────
 
-  const board = snap?.boards.find((b) => b.id === boardId) ?? null;
-  const columns = useMemo(() => (snap && board ? snap.columns.filter((c) => c.boardId === board.id) : []), [snap, board]);
-  const baseItems: Items = useMemo(() => {
+  const board = boards.find((b) => b.id === boardId) ?? null;
+  const columns = useMemo(
+    () => (snap && board ? snap.columns.filter((c) => c.boardId === board.id).sort((a, b) => a.position - b.position) : []),
+    [snap, board],
+  );
+  const colIds = useMemo(() => new Set(columns.map((c) => c.id)), [columns]);
+  const cardById = useMemo(() => new Map((snap?.cards ?? []).map((c) => [c.id, c])), [snap]);
+  const metaMap = useMemo(() => {
+    const m = new Map<string, CardMeta>();
+    const get = (id: string) => m.get(id) ?? (m.set(id, { ...noMeta }), m.get(id)!);
+    for (const c of snap?.checks ?? []) {
+      get(c.cardId).checkTotal++;
+      if (c.done) get(c.cardId).checkDone++;
+    }
+    for (const c of snap?.comments ?? []) get(c.cardId).comments++;
+    for (const a of snap?.attachments ?? []) get(a.cardId).attachments++;
+    return m;
+  }, [snap]);
+  const metaOf = useCallback((id: string) => metaMap.get(id) ?? noMeta, [metaMap]);
+
+  const filtered = hasFilters(filters);
+  const dragDisabled = filtered || view === 'due' || selectMode || scope === 'all';
+  const boardCards = useMemo(() => (snap?.cards ?? []).filter((c) => colIds.has(c.columnId)), [snap, colIds]);
+  const archivedCards = useMemo(() => boardCards.filter((c) => c.archived).sort((a, b) => a.position - b.position), [boardCards]);
+
+  const allBase: Items = useMemo(() => {
     const m: Items = {};
     for (const c of columns) {
-      m[c.id] = (snap?.cards ?? [])
+      m[c.id] = boardCards
         .filter((k) => k.columnId === c.id && !k.archived)
         .sort((a, b) => a.position - b.position)
         .map((k) => k.id);
     }
     return m;
-  }, [snap, columns]);
-  const items = dragItems ?? baseItems;
-  const cardById = useMemo(() => new Map((snap?.cards ?? []).map((c) => [c.id, c])), [snap]);
+  }, [boardCards, columns]);
+  const shownBase: Items = useMemo(() => {
+    if (!filtered) return allBase;
+    const m: Items = {};
+    for (const c of columns) m[c.id] = allBase[c.id].filter((id) => matchCard(cardById.get(id)!, filters));
+    return m;
+  }, [allBase, filtered, columns, cardById, filters]);
+  const items = dragItems ?? shownBase;
+
+  const dueCards = useMemo(() => boardCards.filter((c) => matchCard(c, filters)), [boardCards, filters]);
+  const dueVisibleIds = useMemo(
+    () => groupByDue(dueCards, columns, today, showDone).flatMap((g) => g.cards.map((c) => c.id)),
+    [dueCards, columns, today, showDone],
+  );
+  const visibleIds = view === 'due' ? dueVisibleIds : Object.values(shownBase).flat();
+
+  const allMatches = useMemo(
+    () => (scope === 'all' ? (snap?.cards ?? []).filter((c) => !c.archived && filtered && matchCard(c, filters)) : []),
+    [scope, snap, filtered, filters],
+  );
+
   const assignees = useMemo(() => {
     const set = new Set<string>();
     for (const c of snap?.cards ?? []) {
-      const col = snap?.columns.find((x) => x.id === c.columnId);
-      if (c.assignee && col?.boardId === boardId) set.add(c.assignee);
+      if (!c.assignee) continue;
+      if (scope === 'all' || colIds.has(c.columnId)) set.add(c.assignee);
     }
     return [...set].sort();
-  }, [snap, boardId]);
+  }, [snap, scope, colIds]);
+
+  const notices = useMemo(() => (snap ? computeNotices(snap, today) : []), [snap, today]);
+
+  // 보드·검색·필터·보기 방식이 바뀌면 선택을 해제한다
+  useEffect(() => {
+    setSelected(new Set());
+  }, [boardId, filters, scope, view]);
+  // 사라진 카드는 선택에서 뺀다
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => cardById.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [cardById]);
+  // 다른 탭에서 지운 카드를 열어 두고 있었다면 안내하고 닫는다
+  useEffect(() => {
+    if (openCardId && snap && !cardById.has(openCardId)) {
+      setOpenCardId(null);
+      showToast('이 카드는 다른 탭에서 삭제되었어요.');
+    }
+  }, [openCardId, snap, cardById, showToast]);
+
+  // ───────── 브라우저 알림 ─────────
+
+  const browserSupported = typeof Notification !== 'undefined';
+  useEffect(() => {
+    if (!browserOn || !browserSupported || Notification.permission !== 'granted') return;
+    const read = (): string[] => {
+      try {
+        return (JSON.parse(store(NOTIFIED_KEY) ?? '[]') as string[]).filter((k) => k.endsWith(`|${today}`));
+      } catch {
+        return [];
+      }
+    };
+    for (const n of notices) {
+      const k = `${n.cardId}|${n.kind}|${n.dueDate}|${today}`;
+      const cur = read(); // 표시 직전에 다시 확인 (다른 탭이 먼저 보여줬을 수 있다)
+      if (cur.includes(k)) continue;
+      storeSet(NOTIFIED_KEY, JSON.stringify([...cur, k]));
+      try {
+        new Notification(`${NOTICE_TEXT[n.kind]}: ${n.title}`, { body: `${n.boardName} · 마감 ${n.dueDate}` });
+      } catch {
+        /* 알림을 못 띄워도 앱은 계속 동작한다 */
+      }
+    }
+  }, [notices, browserOn, browserSupported, today]);
+
+  const toggleBrowser = async () => {
+    if (browserOn) {
+      setBrowserOn(false);
+      storeSet(NOTIFY_ON_KEY, '0');
+      return;
+    }
+    const p = await Notification.requestPermission();
+    if (p === 'granted') {
+      setBrowserOn(true);
+      storeSet(NOTIFY_ON_KEY, '1');
+    } else showToast('브라우저에서 알림 권한을 허용해야 켤 수 있어요.');
+  };
 
   // ───────── 드래그 ─────────
 
@@ -224,15 +435,14 @@ export function App() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const findContainer = (id: string, it: Items) =>
-    id.startsWith('col:') ? id.slice(4) : Object.keys(it).find((k) => it[k].includes(id));
+  const findContainer = (id: string, it: Items) => (id.startsWith('col:') ? id.slice(4) : Object.keys(it).find((k) => it[k].includes(id)));
 
   const onDragStart = (e: DragStartEvent) => {
     const id = String(e.active.id);
-    const col = findContainer(id, baseItems);
-    if (col) dragOrigin.current = { columnId: col, index: baseItems[col].indexOf(id) };
+    const col = findContainer(id, shownBase);
+    if (col) dragOrigin.current = { columnId: col, index: shownBase[col].indexOf(id) };
     setActiveId(id);
-    setDragItems(baseItems);
+    setDragItems(shownBase);
   };
   const onDragOver = (e: DragOverEvent) => {
     const { active, over } = e;
@@ -307,17 +517,48 @@ export function App() {
   const confirmDeleteBoard = (id: string) => {
     const b = snap?.boards.find((x) => x.id === id);
     if (!b || !snap) return;
-    const colIds = new Set(snap.columns.filter((c) => c.boardId === id).map((c) => c.id));
-    const n = snap.cards.filter((c) => colIds.has(c.columnId)).length;
-    const msg = `"${b.name}" 보드를 삭제할까요?\n열 ${colIds.size}개와 카드 ${n}개도 함께 삭제돼요. (되돌리기로 복원할 수 있어요)`;
-    if (window.confirm(msg)) run({ op: 'deleteBoard', id });
+    const cols = new Set(snap.columns.filter((c) => c.boardId === id).map((c) => c.id));
+    const n = snap.cards.filter((c) => cols.has(c.columnId)).length;
+    if (window.confirm(`"${b.name}" 보드를 삭제할까요?\n열 ${cols.size}개와 카드 ${n}개(보관 카드 포함)도 함께 삭제돼요. (되돌리기로 복원할 수 있어요)`)) {
+      run({ op: 'deleteBoard', id });
+    }
   };
-  const confirmDeleteCard = (c: Card) => {
-    if (window.confirm(`"${c.title}" 카드를 삭제할까요? (되돌리기로 복원할 수 있어요)`)) {
+  const confirmDeleteCard = (c: Card, permanent = false) => {
+    const msg = permanent ? `"${c.title}" 카드를 영구 삭제할까요? (되돌리기로 복원할 수 있어요)` : `"${c.title}" 카드를 삭제할까요? (되돌리기로 복원할 수 있어요)`;
+    if (window.confirm(msg)) {
       if (openCardId === c.id) setOpenCardId(null);
       run({ op: 'deleteCard', id: c.id });
     }
   };
+  const selectedIds = [...selected].filter((id) => visibleIds.includes(id));
+  const bulk = async (body: Record<string, unknown>) => {
+    if (await run({ ...body, ids: selectedIds })) setSelected(new Set());
+  };
+
+  const newestBoard = () => {
+    const s = snapRef.current;
+    return s ? [...s.boards].sort((a, b) => a.position - b.position).at(-1) : undefined;
+  };
+
+  const cardActions = {
+    onOpen: setOpenCardId,
+    onMoveTo: (cardId: string, toColumnId: string) => run({ op: 'moveCard', id: cardId, toColumnId, index: 9999 }),
+    onDelete: (c: Card) => confirmDeleteCard(c),
+    onDuplicate: (c: Card) => run({ op: 'duplicateCard', id: c.id }),
+    onArchive: (c: Card) => run({ op: 'setArchived', ids: [c.id], archived: true }),
+  };
+
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const toggleLabelFilter = (c: LabelColor) =>
+    setFilters((f) => ({ ...f, labels: f.labels.includes(c) ? f.labels.filter((x) => x !== c) : [...f.labels, c] }));
+  const toggleAssigneeFilter = (a: string) =>
+    setFilters((f) => ({ ...f, assignees: f.assignees.includes(a) ? f.assignees.filter((x) => x !== a) : [...f.assignees, a] }));
 
   // ───────── 그리기 ─────────
 
@@ -335,13 +576,18 @@ export function App() {
   const openCard = openCardId ? cardById.get(openCardId) ?? null : null;
   const activeCard = activeId ? cardById.get(activeId) ?? null : null;
   const h = history.current;
+  const modalAssignees = (() => {
+    const set = new Set<string>();
+    for (const c of snap.cards) if (c.assignee && colIds.has(c.columnId)) set.add(c.assignee);
+    return [...set].sort();
+  })();
 
   return (
     <div className="app">
       <aside className="sidebar" aria-label="보드 목록">
         <h1 className="brand">칸반 보드</h1>
         <ul className="boards">
-          {snap.boards.map((b) => (
+          {boards.map((b) => (
             <li key={b.id} className={b.id === boardId ? 'active' : ''}>
               {renamingBoard === b.id ? (
                 <InlineEdit
@@ -361,6 +607,24 @@ export function App() {
                   </button>
                   <Menu id={`board:${b.id}`} open={menu} setOpen={setMenu} label={`${b.name} 보드 메뉴`}>
                     <button onClick={() => setRenamingBoard(b.id)}>이름 변경</button>
+                    <button
+                      onClick={async () => {
+                        if (await run({ op: 'duplicateBoard', id: b.id })) {
+                          const nb = newestBoard();
+                          if (nb) setBoardId(nb.id);
+                        }
+                      }}
+                    >
+                      복제
+                    </button>
+                    <button
+                      onClick={() => {
+                        setBoardId(b.id);
+                        setArchiveOpen(true);
+                      }}
+                    >
+                      보관함
+                    </button>
                     <button className="danger" onClick={() => confirmDeleteBoard(b.id)}>
                       삭제
                     </button>
@@ -377,11 +641,9 @@ export function App() {
             label="새 보드 이름"
             onSave={async (v) => {
               setCreatingBoard(false);
-              const ok = await run({ op: 'createBoard', name: v });
-              if (ok) {
-                const s = snapRef.current;
-                const newest = s?.boards[s.boards.length - 1];
-                if (newest) setBoardId(newest.id);
+              if (await run({ op: 'createBoard', name: v })) {
+                const nb = newestBoard();
+                if (nb) setBoardId(nb.id);
               }
             }}
             onCancel={() => setCreatingBoard(false)}
@@ -397,6 +659,9 @@ export function App() {
         <header className="topbar">
           <h2 className="board-title">{board ? board.name : ''}</h2>
           <div className="spacer" />
+          <span className={`conn ${conn}`} role="status" title="다른 탭과 실시간 연결 상태">
+            {conn === 'connected' ? '● 연결됨' : conn === 'reconnecting' ? '○ 다시 연결 중…' : '○ 연결 중…'}
+          </span>
           <span className={`status ${status}`} role="status">
             {status === 'saving' && '저장 중…'}
             {status === 'saved' && '저장됨'}
@@ -408,25 +673,149 @@ export function App() {
           <button onClick={() => step('redo')} disabled={!h.canRedo()} title="다시 실행 (Ctrl+Shift+Z)" aria-label="다시 실행">
             ↷ 다시 실행
           </button>
+          <Bell
+            notices={notices}
+            menu={menu}
+            setMenu={setMenu}
+            browserOn={browserOn}
+            browserSupported={browserSupported}
+            onToggleBrowser={toggleBrowser}
+            onOpen={(n: Notice) => {
+              setScope('board');
+              setFilters(emptyFilters);
+              setBoardId(n.boardId);
+              setOpenCardId(n.cardId);
+              setMenu(null);
+            }}
+            onDismiss={(n: Notice) => run({ op: 'dismiss', cardId: n.cardId, kind: n.kind, dueDate: n.dueDate })}
+          />
+          <select className="theme-select" aria-label="테마" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+            <option value="system">시스템</option>
+            <option value="light">밝게</option>
+            <option value="dark">어둡게</option>
+          </select>
         </header>
 
-        {!board ? (
+        <div className="filterbar">
+          <select aria-label="검색 범위" value={scope} onChange={(e) => setScope(e.target.value as 'board' | 'all')}>
+            <option value="board">현재 보드</option>
+            <option value="all">모든 보드</option>
+          </select>
+          <input
+            className="search"
+            type="search"
+            aria-label="카드 검색"
+            placeholder="제목·설명 검색"
+            value={filters.query}
+            onChange={(e) => setFilters((f) => ({ ...f, query: e.target.value }))}
+          />
+          <div className="chips" role="group" aria-label="라벨 필터">
+            {LABEL_COLORS.map((c) => (
+              <button
+                key={c}
+                className={`lbl-btn lbl-${c} ${filters.labels.includes(c) ? 'on' : ''}`}
+                aria-pressed={filters.labels.includes(c)}
+                aria-label={`${LABEL_NAMES[c]} 라벨 필터`}
+                title={`${LABEL_NAMES[c]} 라벨만 보기`}
+                onClick={() => toggleLabelFilter(c)}
+              >
+                {filters.labels.includes(c) ? '✓' : ''}
+              </button>
+            ))}
+          </div>
+          <span className="menu" onClick={(e) => e.stopPropagation()}>
+            <button aria-haspopup="true" aria-expanded={menu === 'assignee'} onClick={() => setMenu(menu === 'assignee' ? null : 'assignee')}>
+              담당자{filters.assignees.length > 0 ? ` (${filters.assignees.length})` : ''} ▾
+            </button>
+            {menu === 'assignee' && (
+              <div className="menu-pop left" role="group" aria-label="담당자 필터">
+                {[NO_ASSIGNEE, ...assignees].map((a) => (
+                  <label key={a} className="check-opt">
+                    <input type="checkbox" checked={filters.assignees.includes(a)} onChange={() => toggleAssigneeFilter(a)} />
+                    {a === NO_ASSIGNEE ? '담당자 없음' : a}
+                  </label>
+                ))}
+              </div>
+            )}
+          </span>
+          {filtered && (
+            <button className="link" onClick={() => setFilters(emptyFilters)}>
+              필터 지우기
+            </button>
+          )}
+          <div className="spacer" />
+          {scope === 'board' && (
+            <>
+              <div className="seg" role="group" aria-label="보기 방식">
+                <button className={view === 'kanban' ? 'on' : ''} aria-pressed={view === 'kanban'} onClick={() => setView('kanban')}>
+                  칸반
+                </button>
+                <button className={view === 'due' ? 'on' : ''} aria-pressed={view === 'due'} onClick={() => setView('due')}>
+                  마감일
+                </button>
+              </div>
+              {view === 'due' && (
+                <label className="inline-check">
+                  <input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} />
+                  완료 포함
+                </label>
+              )}
+              <button
+                aria-pressed={selectMode}
+                className={selectMode ? 'on' : ''}
+                onClick={() => {
+                  setSelectMode((m) => !m);
+                  setSelected(new Set());
+                }}
+              >
+                {selectMode ? '선택 끝내기' : '선택'}
+              </button>
+              <button onClick={() => setArchiveOpen(true)} disabled={!board}>
+                보관함{archivedCards.length > 0 ? ` (${archivedCards.length})` : ''}
+              </button>
+            </>
+          )}
+        </div>
+
+        {!board && scope === 'board' ? (
           <div className="center">
             <p>첫 보드를 만들어 보세요.</p>
             <button className="primary" onClick={() => setCreatingBoard(true)}>
               + 새 보드
             </button>
           </div>
+        ) : scope === 'all' ? (
+          <AllSearchResults
+            boards={boards}
+            columns={snap.columns}
+            cards={allMatches}
+            hasFilter={filtered}
+            today={today}
+            metaOf={metaOf}
+            onPick={(card, bId) => {
+              setFilters(emptyFilters);
+              setScope('board');
+              setView('kanban');
+              setBoardId(bId);
+              setOpenCardId(card.id);
+            }}
+          />
+        ) : view === 'due' ? (
+          <DueView
+            cards={dueCards}
+            columns={columns}
+            today={today}
+            includeDone={showDone}
+            metaOf={metaOf}
+            selecting={selectMode}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+            onOpen={setOpenCardId}
+          />
         ) : (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCorners}
-            onDragStart={onDragStart}
-            onDragOver={onDragOver}
-            onDragEnd={onDragEnd}
-            onDragCancel={onDragCancel}
-          >
+          <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
             <div className="columns">
+              {filtered && <div className="filter-note" role="status">필터를 쓰는 동안에는 카드를 끌어서 옮길 수 없어요. 카드 메뉴(⋯)나 카드 안의 ‘소속 열’로 옮겨 주세요.</div>}
               {columns.map((col, i) => (
                 <ColumnView
                   key={col.id}
@@ -434,45 +823,97 @@ export function App() {
                   index={i}
                   total={columns.length}
                   cardIds={items[col.id] ?? []}
+                  hiddenCount={filtered ? (allBase[col.id]?.length ?? 0) - (items[col.id]?.length ?? 0) : 0}
                   cardById={cardById}
+                  metaOf={metaOf}
                   today={today}
                   menu={menu}
                   setMenu={setMenu}
                   columns={columns}
+                  dragDisabled={dragDisabled}
+                  selecting={selectMode}
+                  selected={selected}
+                  onToggleSelect={toggleSelect}
                   onRename={(name) => run({ op: 'renameColumn', id: col.id, name })}
                   onDelete={() => confirmDeleteColumn(col)}
                   onMove={(dir) => run({ op: 'moveColumn', id: col.id, dir })}
                   onToggleDone={() => run({ op: 'setColumnDone', id: col.id, done: !col.isDone })}
                   onAddCard={(title) => run({ op: 'addCard', columnId: col.id, title })}
-                  onOpenCard={setOpenCardId}
-                  onMoveCardTo={(cardId, toColumnId) => run({ op: 'moveCard', id: cardId, toColumnId, index: 9999 })}
-                  onDeleteCard={confirmDeleteCard}
+                  actions={cardActions}
                 />
               ))}
-              <AddColumn onAdd={(name) => run({ op: 'addColumn', boardId: board.id, name })} />
+              <AddColumn onAdd={(name) => board && run({ op: 'addColumn', boardId: board.id, name })} />
             </div>
             <DragOverlay>
-              {activeCard ? (
-                <CardFace
-                  card={activeCard}
-                  overdue={isOverdue(activeCard, columns.find((c) => c.id === activeCard.columnId), today)}
-                />
-              ) : null}
+              {activeCard ? <CardFace card={activeCard} overdue={isOverdue(activeCard, columns.find((c) => c.id === activeCard.columnId), today)} meta={metaOf(activeCard.id)} /> : null}
             </DragOverlay>
           </DndContext>
         )}
       </main>
 
+      {selectMode && scope === 'board' && (
+        <div className="bulkbar" role="toolbar" aria-label="선택한 카드 작업">
+          <strong>{selectedIds.length}개 선택</strong>
+          <button onClick={() => setSelected(new Set(visibleIds))}>보이는 카드 전체 선택</button>
+          <select
+            aria-label="선택한 카드를 열로 이동"
+            disabled={selectedIds.length === 0}
+            value=""
+            onChange={(e) => e.target.value && bulk({ op: 'bulkMove', toColumnId: e.target.value })}
+          >
+            <option value="">열 이동…</option>
+            {columns.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+                {c.isDone ? ' (완료)' : ''}
+              </option>
+            ))}
+          </select>
+          <button disabled={selectedIds.length === 0} onClick={() => bulk({ op: 'setArchived', archived: true })}>
+            보관
+          </button>
+          <button
+            className="danger"
+            disabled={selectedIds.length === 0}
+            onClick={() => {
+              if (window.confirm(`선택한 카드 ${selectedIds.length}개를 삭제할까요? (되돌리기로 복원할 수 있어요)`)) bulk({ op: 'bulkDelete' });
+            }}
+          >
+            삭제
+          </button>
+          <button onClick={() => setSelected(new Set())}>선택 해제</button>
+        </div>
+      )}
+
+      {archiveOpen && board && (
+        <ArchiveModal
+          cards={archivedCards}
+          columns={columns}
+          onRestore={(c) => run({ op: 'setArchived', ids: [c.id], archived: false })}
+          onDelete={(c) => confirmDeleteCard(c, true)}
+          onClose={() => setArchiveOpen(false)}
+        />
+      )}
+
       {openCard && (
         <CardModal
           key={openCard.id}
           card={openCard}
-          columns={columns}
-          assignees={assignees}
+          columns={columns.length > 0 && colIds.has(openCard.columnId) ? columns : snap.columns.filter((c) => c.boardId === snap.columns.find((x) => x.id === openCard.columnId)?.boardId).sort((a, b) => a.position - b.position)}
+          assignees={modalAssignees}
+          checks={snap.checks.filter((c) => c.cardId === openCard.id).sort((a, b) => a.position - b.position)}
+          comments={snap.comments.filter((c) => c.cardId === openCard.id)}
+          attachments={snap.attachments.filter((a) => a.cardId === openCard.id)}
           status={status}
           onSave={(fields) => run({ op: 'updateCard', id: openCard.id, fields })}
           onMoveTo={(toColumnId) => run({ op: 'moveCard', id: openCard.id, toColumnId, index: 9999 })}
+          act={run}
+          onUpload={(file) => doUpload(openCard.id, file)}
           onDelete={() => confirmDeleteCard(openCard)}
+          onDuplicate={() => run({ op: 'duplicateCard', id: openCard.id })}
+          onArchive={async () => {
+            if (await run({ op: 'setArchived', ids: [openCard.id], archived: true })) setOpenCardId(null);
+          }}
           onClose={() => {
             const id = openCard.id;
             setOpenCardId(null);
@@ -486,413 +927,6 @@ export function App() {
           {toast}
         </div>
       )}
-    </div>
-  );
-}
-
-// ───────── 작은 부품들 ─────────
-
-function isOverdue(card: Card, col: Column | undefined, today: string) {
-  return !!card.dueDate && card.dueDate < today && !col?.isDone && !card.archived;
-}
-
-function Menu(props: {
-  id: string;
-  open: string | null;
-  setOpen: (v: string | null) => void;
-  label: string;
-  children: React.ReactNode;
-}) {
-  const isOpen = props.open === props.id;
-  return (
-    <span className="menu" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-      <button
-        className="icon-btn"
-        aria-label={props.label}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
-        onClick={() => props.setOpen(isOpen ? null : props.id)}
-      >
-        ⋯
-      </button>
-      {isOpen && (
-        <div className="menu-pop" role="menu" onClick={() => props.setOpen(null)}>
-          {props.children}
-        </div>
-      )}
-    </span>
-  );
-}
-
-function InlineEdit(props: {
-  initial: string;
-  max: number;
-  label: string;
-  onSave: (v: string) => void;
-  onCancel: () => void;
-}) {
-  const [v, setV] = useState(props.initial);
-  const done = useRef(false);
-  const finish = (save: boolean) => {
-    if (done.current) return;
-    done.current = true;
-    const t = v.trim();
-    if (save && t) props.onSave(t);
-    else props.onCancel();
-  };
-  return (
-    <input
-      className="inline-edit"
-      autoFocus
-      aria-label={props.label}
-      placeholder={props.label}
-      maxLength={props.max}
-      value={v}
-      onChange={(e) => setV(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') finish(true);
-        if (e.key === 'Escape') finish(false);
-      }}
-      onBlur={() => finish(true)}
-    />
-  );
-}
-
-function AddColumn({ onAdd }: { onAdd: (name: string) => void }) {
-  const [adding, setAdding] = useState(false);
-  return (
-    <div className="add-column">
-      {adding ? (
-        <InlineEdit
-          initial=""
-          max={LIMITS.columnName}
-          label="열 이름"
-          onSave={(v) => {
-            setAdding(false);
-            onAdd(v);
-          }}
-          onCancel={() => setAdding(false)}
-        />
-      ) : (
-        <button onClick={() => setAdding(true)}>+ 열 추가</button>
-      )}
-    </div>
-  );
-}
-
-function ColumnView(props: {
-  col: Column;
-  index: number;
-  total: number;
-  cardIds: string[];
-  cardById: Map<string, Card>;
-  today: string;
-  menu: string | null;
-  setMenu: (v: string | null) => void;
-  columns: Column[];
-  onRename: (name: string) => void;
-  onDelete: () => void;
-  onMove: (dir: -1 | 1) => void;
-  onToggleDone: () => void;
-  onAddCard: (title: string) => Promise<boolean>;
-  onOpenCard: (id: string) => void;
-  onMoveCardTo: (cardId: string, toColumnId: string) => void;
-  onDeleteCard: (c: Card) => void;
-}) {
-  const { col } = props;
-  const { setNodeRef, isOver } = useDroppable({ id: `col:${col.id}` });
-  const [renaming, setRenaming] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [title, setTitle] = useState('');
-
-  const submit = async () => {
-    const t = title.trim();
-    if (!t) return;
-    setTitle('');
-    await props.onAddCard(t);
-  };
-
-  return (
-    <section className={`column ${col.isDone ? 'done' : ''} ${isOver ? 'over' : ''}`} aria-label={`${col.name} 열`}>
-      <header className="column-head">
-        {renaming ? (
-          <InlineEdit
-            initial={col.name}
-            max={LIMITS.columnName}
-            label="열 이름"
-            onSave={(v) => {
-              setRenaming(false);
-              if (v !== col.name) props.onRename(v);
-            }}
-            onCancel={() => setRenaming(false)}
-          />
-        ) : (
-          <h3 onDoubleClick={() => setRenaming(true)} title="더블클릭하면 이름을 바꿀 수 있어요">
-            {col.name}
-            {col.isDone && <span className="done-badge">완료 열</span>}
-            <span className="count">{props.cardIds.length}</span>
-          </h3>
-        )}
-        <Menu id={`col:${col.id}`} open={props.menu} setOpen={props.setMenu} label={`${col.name} 열 메뉴`}>
-          <button onClick={() => setRenaming(true)}>이름 변경</button>
-          <button onClick={props.onToggleDone}>{col.isDone ? '완료 열 해제' : '완료 열로 지정'}</button>
-          <button disabled={props.index === 0} onClick={() => props.onMove(-1)}>
-            ← 왼쪽으로 이동
-          </button>
-          <button disabled={props.index === props.total - 1} onClick={() => props.onMove(1)}>
-            오른쪽으로 이동 →
-          </button>
-          <button className="danger" onClick={props.onDelete}>
-            열 삭제
-          </button>
-        </Menu>
-      </header>
-
-      <div ref={setNodeRef} className="cards">
-        <SortableContext items={props.cardIds} strategy={verticalListSortingStrategy}>
-          {props.cardIds.map((id) => {
-            const card = props.cardById.get(id);
-            if (!card) return null;
-            return (
-              <SortableCard
-                key={id}
-                card={card}
-                overdue={isOverdue(card, col, props.today)}
-                menu={props.menu}
-                setMenu={props.setMenu}
-                columns={props.columns}
-                onOpen={() => props.onOpenCard(id)}
-                onMoveTo={(to) => props.onMoveCardTo(id, to)}
-                onDelete={() => props.onDeleteCard(card)}
-              />
-            );
-          })}
-        </SortableContext>
-      </div>
-
-      {adding ? (
-        <div className="add-card-form">
-          <textarea
-            autoFocus
-            rows={2}
-            maxLength={LIMITS.cardTitle}
-            placeholder="카드 제목을 쓰고 Enter"
-            aria-label="카드 제목"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-              if (e.key === 'Escape') {
-                setAdding(false);
-                setTitle('');
-              }
-            }}
-            onBlur={() => {
-              if (!title.trim()) setAdding(false);
-            }}
-          />
-        </div>
-      ) : (
-        <button className="add-card" onClick={() => setAdding(true)}>
-          + 카드 추가
-        </button>
-      )}
-    </section>
-  );
-}
-
-function CardFace({ card, overdue }: { card: Card; overdue: boolean }) {
-  return (
-    <div className={`card ${overdue ? 'overdue' : ''}`}>
-      <div className="card-title">{card.title}</div>
-      {(card.dueDate || card.assignee) && (
-        <div className="card-meta">
-          {card.dueDate && <span className={`due ${overdue ? 'late' : ''}`}>{card.dueDate}</span>}
-          <span className="grow" />
-          {card.assignee && (
-            <span className="avatar" title={card.assignee}>
-              {[...card.assignee][0]}
-            </span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SortableCard(props: {
-  card: Card;
-  overdue: boolean;
-  menu: string | null;
-  setMenu: (v: string | null) => void;
-  columns: Column[];
-  onOpen: () => void;
-  onMoveTo: (columnId: string) => void;
-  onDelete: () => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: props.card.id });
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 };
-  return (
-    <div ref={setNodeRef} style={style} className="card-wrap">
-      <div
-        {...attributes}
-        {...listeners}
-        data-card-id={props.card.id}
-        className="card-hit"
-        onClick={props.onOpen}
-        aria-label={`카드: ${props.card.title}`}
-      >
-        <CardFace card={props.card} overdue={props.overdue} />
-      </div>
-      <div className="card-menu">
-        <Menu id={`card:${props.card.id}`} open={props.menu} setOpen={props.setMenu} label={`${props.card.title} 카드 메뉴`}>
-          <button onClick={props.onOpen}>열기</button>
-          {props.columns
-            .filter((c) => c.id !== props.card.columnId)
-            .map((c) => (
-              <button key={c.id} onClick={() => props.onMoveTo(c.id)}>
-                “{c.name}”(으)로 이동
-              </button>
-            ))}
-          <button className="danger" onClick={props.onDelete}>
-            카드 삭제
-          </button>
-        </Menu>
-      </div>
-    </div>
-  );
-}
-
-function CardModal(props: {
-  card: Card;
-  columns: Column[];
-  assignees: string[];
-  status: Status;
-  onSave: (fields: Record<string, unknown>) => Promise<boolean>;
-  onMoveTo: (columnId: string) => Promise<boolean>;
-  onDelete: () => void;
-  onClose: () => void;
-}) {
-  const { card } = props;
-  const [title, setTitle] = useState(card.title);
-  const [desc, setDesc] = useState(card.description);
-  const [assignee, setAssignee] = useState(card.assignee);
-  const [due, setDue] = useState(card.dueDate ?? '');
-  const [titleError, setTitleError] = useState(false);
-  const [failed, setFailed] = useState(false);
-
-  const flush = async (): Promise<boolean> => {
-    const fields: Record<string, unknown> = {};
-    if (title.trim() && title.trim() !== card.title) fields.title = title;
-    if (desc !== card.description) fields.description = desc;
-    if (assignee.trim() !== card.assignee) fields.assignee = assignee;
-    if (due !== (card.dueDate ?? '')) fields.dueDate = due || null;
-    setTitleError(!title.trim());
-    if (!title.trim()) {
-      setTitle(card.title);
-    }
-    if (Object.keys(fields).length === 0) {
-      setFailed(false);
-      return true;
-    }
-    const ok = await props.onSave(fields);
-    setFailed(!ok);
-    return ok;
-  };
-  const close = async () => {
-    if (await flush()) props.onClose();
-  };
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        close();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
-
-  return (
-    <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="카드 편집">
-        <div className="modal-head">
-          <span className={`status ${failed ? 'error' : props.status}`} role="status">
-            {failed ? '저장 실패' : props.status === 'saving' ? '저장 중…' : props.status === 'saved' ? '저장됨' : ''}
-          </span>
-          {failed && <button onClick={flush}>다시 시도</button>}
-          <div className="spacer" />
-          <button className="icon-btn" aria-label="닫기" onClick={close}>
-            ✕
-          </button>
-        </div>
-
-        <label>
-          제목
-          <input
-            autoFocus
-            maxLength={LIMITS.cardTitle}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={flush}
-            aria-invalid={titleError}
-          />
-        </label>
-        {titleError && <p className="field-error">제목은 비워둘 수 없어요.</p>}
-
-        <label>
-          설명
-          <textarea rows={5} maxLength={LIMITS.cardDescription} value={desc} onChange={(e) => setDesc(e.target.value)} onBlur={flush} />
-        </label>
-
-        <div className="row">
-          <label>
-            담당자
-            <input
-              list="assignee-list"
-              maxLength={50}
-              value={assignee}
-              onChange={(e) => setAssignee(e.target.value)}
-              onBlur={flush}
-            />
-            <datalist id="assignee-list">
-              {props.assignees.map((a) => (
-                <option key={a} value={a} />
-              ))}
-            </datalist>
-          </label>
-          <label>
-            마감일
-            <input type="date" value={due} onChange={(e) => setDue(e.target.value)} onBlur={flush} />
-          </label>
-        </div>
-
-        <label>
-          소속 열
-          <select
-            value={card.columnId}
-            onChange={async (e) => {
-              if (await flush()) props.onMoveTo(e.target.value);
-            }}
-          >
-            {props.columns.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="modal-foot">
-          <button className="danger" onClick={props.onDelete}>
-            카드 삭제
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
