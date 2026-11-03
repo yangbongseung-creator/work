@@ -36,6 +36,12 @@ export function checkRequest(
   if (!host || !localOk(host, ports)) {
     return { ok: false, status: 403, reason: '허용되지 않은 주소(Host)입니다.' };
   }
+  // 브라우저가 알려주는 "요청을 보낸 곳" — 다른 사이트(cross-site)나 같은 PC의 다른 주소(same-site)에서 온 요청은 막는다.
+  // 'same-origin'(우리 화면)과 'none'(주소창에 직접 입력)은 통과. 헤더가 없으면(curl 등) 다른 검사에 맡긴다.
+  const site = req.headers.get('sec-fetch-site');
+  if (site && site !== 'same-origin' && site !== 'none') {
+    return { ok: false, status: 403, reason: '다른 사이트에서 온 요청은 받을 수 없습니다.' };
+  }
   const origin = req.headers.get('origin');
   const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
   if (origin) {

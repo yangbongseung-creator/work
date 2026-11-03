@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { isYmd, nextDueDate } from './dates';
+import { assertValidPatch } from './patchcheck';
 import {
   AppError,
   LABEL_COLORS,
@@ -110,10 +111,17 @@ function cleanDate(raw: unknown): string | null {
 const REPEATS: Repeat[] = ['none', 'daily', 'weekly', 'monthly'];
 const NOTIFY: NotifyKind[] = ['dayBefore', 'today', 'overdue'];
 
+const MAX_BULK = 5000;
+function capIds(ids: string[]) {
+  if (ids.length > MAX_BULK) throw new AppError('INVALID', `한 번에 ${MAX_BULK}개까지만 처리할 수 있어요.`);
+}
+
 type Plan = { cardId: string; newId: string; checkIds: string[]; colId: string; due: string; repeat: Repeat };
 
 export class SqliteBoardRepository implements BoardRepository {
   private db: Database.Database;
+  /** 같은 SQL은 한 번만 준비해 재사용한다 (매번 준비하면 메모리가 계속 쌓인다) */
+  private stmts = new Map<string, Database.Statement>();
   private now: () => number;
   private fileExists?: (k: string) => boolean;
   private onCommit?: (rev: number) => void;
@@ -170,17 +178,32 @@ export class SqliteBoardRepository implements BoardRepository {
       CREATE INDEX IF NOT EXISTS idx_changes_rev ON changes(revision);
     `);
     // 1~2단계에서 만든 DB를 이어 쓸 수 있게 라벨 칸을 덧붙인다
-    const cardCols = this.db.prepare('PRAGMA table_info(cards)').all() as { name: string }[];
+    const cardCols = this.sql('PRAGMA table_info(cards)').all() as { name: string }[];
     if (!cardCols.some((c) => c.name === 'labels')) {
       this.db.exec(`ALTER TABLE cards ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`);
     }
   }
 
+  private sql(query: string): Database.Statement {
+    let st = this.stmts.get(query);
+    if (!st) {
+      st = this.db.prepare(query);
+      // 물음표 개수만 다른 IN (...) 문장이 끝없이 쌓이지 않도록 캐시는 일정 크기까지만
+      if (this.stmts.size < 400) this.stmts.set(query, st);
+    }
+    return st;
+  }
+
+  close() {
+    this.stmts.clear();
+    this.db.close();
+  }
+
   // ───────── 읽기 ─────────
 
   snapshot(): Snapshot {
-    const q = (sql: string) => this.db.prepare(sql).all() as any[];
-    const revision = (this.db.prepare('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
+    const q = (sql: string) => this.sql(sql).all() as any[];
+    const revision = (this.sql('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
     return {
       revision,
       boards: q('SELECT * FROM boards ORDER BY position, id').map(toBoard),
@@ -196,22 +219,22 @@ export class SqliteBoardRepository implements BoardRepository {
   private load(k: string): Row | undefined {
     const { kind, id } = parseKey(k);
     const extra = kind === 'attachment' ? ' AND deleted_at IS NULL' : '';
-    const r = this.db.prepare(`SELECT * FROM ${TABLE[kind]} WHERE id = ?${extra}`).get(id) as any;
+    const r = this.sql(`SELECT * FROM ${TABLE[kind]} WHERE id = ?${extra}`).get(id) as any;
     return r ? MAP[kind](r) : undefined;
   }
 
   private columnsOf(boardId: string): Column[] {
-    return (this.db.prepare('SELECT * FROM board_columns WHERE board_id = ? ORDER BY position, id').all(boardId) as any[]).map(toColumn);
+    return (this.sql('SELECT * FROM board_columns WHERE board_id = ? ORDER BY position, id').all(boardId) as any[]).map(toColumn);
   }
   /** 보관 카드까지 포함한 열의 모든 카드 */
   private cardsOf(columnId: string): Card[] {
-    return (this.db.prepare('SELECT * FROM cards WHERE column_id = ? ORDER BY position, id').all(columnId) as any[]).map(toCard);
+    return (this.sql('SELECT * FROM cards WHERE column_id = ? ORDER BY position, id').all(columnId) as any[]).map(toCard);
   }
   private visibleIds(columnId: string): string[] {
-    return (this.db.prepare('SELECT id FROM cards WHERE column_id = ? AND archived = 0 ORDER BY position, id').all(columnId) as { id: string }[]).map((r) => r.id);
+    return (this.sql('SELECT id FROM cards WHERE column_id = ? AND archived = 0 ORDER BY position, id').all(columnId) as { id: string }[]).map((r) => r.id);
   }
   private checksOf(cardId: string): CheckItem[] {
-    return (this.db.prepare('SELECT * FROM check_items WHERE card_id = ? ORDER BY position, id').all(cardId) as any[]).map(toCheck);
+    return (this.sql('SELECT * FROM check_items WHERE card_id = ? ORDER BY position, id').all(cardId) as any[]).map(toCheck);
   }
   private mustBoard(id: string): Board {
     const b = this.load(key('board', id)) as Board | undefined;
@@ -240,10 +263,10 @@ export class SqliteBoardRepository implements BoardRepository {
   // ───────── 설정 ─────────
 
   private getSetting(k: string): string | undefined {
-    return (this.db.prepare('SELECT value FROM app_settings WHERE key = ?').get(k) as { value: string } | undefined)?.value;
+    return (this.sql('SELECT value FROM app_settings WHERE key = ?').get(k) as { value: string } | undefined)?.value;
   }
   private setSetting(k: string, v: string) {
-    this.db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(k, v);
+    this.sql('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(k, v);
   }
   ensureFirstBoard(): void {
     if (this.getSetting('first_board_created') === '1') return;
@@ -274,11 +297,11 @@ export class SqliteBoardRepository implements BoardRepository {
       const forward: Patch = { upsert: [], remove: [] };
       const inverse: Patch = { upsert: [], remove: [] };
       const expect: Expect = [];
-      const log = this.db.prepare('INSERT INTO changes (revision, kind, entity_id, action) VALUES (?, ?, ?, ?)');
+      const log = this.sql('INSERT INTO changes (revision, kind, entity_id, action) VALUES (?, ?, ?, ?)');
       for (const { k, a, b } of changed) {
         const { kind, id } = parseKey(k);
         if (a) {
-          this.db.prepare(`UPDATE ${TABLE[kind]} SET rev = ? WHERE id = ?`).run(revision, id);
+          this.sql(`UPDATE ${TABLE[kind]} SET rev = ? WHERE id = ?`).run(revision, id);
           a.rev = revision;
           forward.upsert.push({ kind, row: a });
         } else {
@@ -289,7 +312,7 @@ export class SqliteBoardRepository implements BoardRepository {
         expect.push({ key: k, rev: a ? revision : null });
         log.run(revision, kind, id, a ? (b ? 'update' : 'create') : 'delete');
       }
-      this.db.prepare('DELETE FROM changes WHERE revision <= ?').run(revision - this.logLimit);
+      this.sql('DELETE FROM changes WHERE revision <= ?').run(revision - this.logLimit);
       return { entry: { label, forward, inverse, expect }, revision };
     });
     const res = run();
@@ -298,8 +321,8 @@ export class SqliteBoardRepository implements BoardRepository {
   }
 
   private bumpRevision(): number {
-    this.db.prepare('UPDATE meta SET revision = revision + 1 WHERE id = 1').run();
-    return (this.db.prepare('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
+    this.sql('UPDATE meta SET revision = revision + 1 WHERE id = 1').run();
+    return (this.sql('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
   }
 
   // ───────── 카드 아래 딸린 것들 ─────────
@@ -308,7 +331,7 @@ export class SqliteBoardRepository implements BoardRepository {
     if (!cardIds.length) return [];
     const q = marks(cardIds.length);
     const get = (table: string, kind: Kind, extra = '') =>
-      (this.db.prepare(`SELECT id FROM ${table} WHERE card_id IN (${q})${extra}`).all(...cardIds) as { id: string }[]).map((r) => key(kind, r.id));
+      (this.sql(`SELECT id FROM ${table} WHERE card_id IN (${q})${extra}`).all(...cardIds) as { id: string }[]).map((r) => key(kind, r.id));
     return [...get('check_items', 'check'), ...get('comments', 'comment'), ...get('attachments', 'attachment', ' AND deleted_at IS NULL')];
   }
 
@@ -316,17 +339,16 @@ export class SqliteBoardRepository implements BoardRepository {
   private removeCardsSql(cardIds: string[]) {
     if (!cardIds.length) return;
     const q = marks(cardIds.length);
-    this.db.prepare(`DELETE FROM check_items WHERE card_id IN (${q})`).run(...cardIds);
-    this.db.prepare(`DELETE FROM comments WHERE card_id IN (${q})`).run(...cardIds);
-    this.db.prepare(`UPDATE attachments SET deleted_at = ? WHERE card_id IN (${q}) AND deleted_at IS NULL`).run(this.now(), ...cardIds);
-    this.db.prepare(`DELETE FROM dismissals WHERE card_id IN (${q})`).run(...cardIds);
-    this.db.prepare(`DELETE FROM cards WHERE id IN (${q})`).run(...cardIds);
+    this.sql(`DELETE FROM check_items WHERE card_id IN (${q})`).run(...cardIds);
+    this.sql(`DELETE FROM comments WHERE card_id IN (${q})`).run(...cardIds);
+    this.sql(`UPDATE attachments SET deleted_at = ? WHERE card_id IN (${q}) AND deleted_at IS NULL`).run(this.now(), ...cardIds);
+    this.sql(`DELETE FROM cards WHERE id IN (${q})`).run(...cardIds);
   }
 
   /** 열 안의 위치를 정리한다: 보이는 카드(주어진 순서) 뒤에 보관 카드를 둔다 */
   private layoutColumn(colId: string, visibleOrder: string[]) {
-    const upd = this.db.prepare('UPDATE cards SET position = ? WHERE id = ?');
-    const archived = (this.db.prepare('SELECT id FROM cards WHERE column_id = ? AND archived = 1 ORDER BY position, id').all(colId) as { id: string }[])
+    const upd = this.sql('UPDATE cards SET position = ? WHERE id = ?');
+    const archived = (this.sql('SELECT id FROM cards WHERE column_id = ? AND archived = 1 ORDER BY position, id').all(colId) as { id: string }[])
       .map((r) => r.id)
       .filter((id) => !visibleOrder.includes(id));
     [...visibleOrder, ...archived].forEach((id, p) => upd.run(p, id));
@@ -341,7 +363,7 @@ export class SqliteBoardRepository implements BoardRepository {
       .run(c.id, c.columnId, c.title, c.description, c.assignee, c.dueDate, c.repeat, JSON.stringify(c.labels), c.archived ? 1 : 0, c.position, c.followupId);
   }
   private insertCheckRow(c: { id: string; cardId: string; text: string; done: boolean; position: number }) {
-    this.db.prepare('INSERT INTO check_items (id, card_id, text, done, position, rev) VALUES (?, ?, ?, ?, ?, 0)').run(c.id, c.cardId, c.text, c.done ? 1 : 0, c.position);
+    this.sql('INSERT INTO check_items (id, card_id, text, done, position, rev) VALUES (?, ?, ?, ?, ?, 0)').run(c.id, c.cardId, c.text, c.done ? 1 : 0, c.position);
   }
 
   // ───────── 보드 ─────────
@@ -351,8 +373,8 @@ export class SqliteBoardRepository implements BoardRepository {
     const boardId = randomUUID();
     const colIds = [randomUUID(), randomUUID(), randomUUID()];
     return this.mutate('보드 만들기', [key('board', boardId), ...colIds.map((c) => key('column', c))], () => {
-      const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM boards').get() as { p: number }).p;
-      this.db.prepare('INSERT INTO boards (id, name, position, rev) VALUES (?, ?, ?, 0)').run(boardId, name, pos);
+      const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM boards').get() as { p: number }).p;
+      this.sql('INSERT INTO boards (id, name, position, rev) VALUES (?, ?, ?, 0)').run(boardId, name, pos);
       ['할 일', '진행 중', '완료'].forEach((n, i) => {
         this.db
           .prepare('INSERT INTO board_columns (id, board_id, name, position, is_done, rev) VALUES (?, ?, ?, ?, ?, 0)')
@@ -365,7 +387,7 @@ export class SqliteBoardRepository implements BoardRepository {
     const name = cleanName(rawName, LIMITS.boardName, '보드 이름');
     this.mustBoard(id);
     return this.mutate('보드 이름 변경', [key('board', id)], () => {
-      this.db.prepare('UPDATE boards SET name = ? WHERE id = ?').run(name, id);
+      this.sql('UPDATE boards SET name = ? WHERE id = ?').run(name, id);
     });
   }
 
@@ -377,8 +399,8 @@ export class SqliteBoardRepository implements BoardRepository {
     const cands = [key('board', id), ...cols.map((c) => key('column', c.id)), ...cardIds.map((c) => key('card', c)), ...this.childKeys(cardIds)];
     return this.mutate('보드 삭제', cands, () => {
       this.removeCardsSql(cardIds);
-      this.db.prepare('DELETE FROM board_columns WHERE board_id = ?').run(id);
-      this.db.prepare('DELETE FROM boards WHERE id = ?').run(id);
+      this.sql('DELETE FROM board_columns WHERE board_id = ?').run(id);
+      this.sql('DELETE FROM boards WHERE id = ?').run(id);
     });
   }
 
@@ -400,8 +422,8 @@ export class SqliteBoardRepository implements BoardRepository {
       ...cardPlans.flatMap((p) => [key('card', p.newId), ...p.checks.map((c) => key('check', c.id))]),
     ];
     return this.mutate('보드 복제', cands, () => {
-      const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM boards').get() as { p: number }).p;
-      this.db.prepare('INSERT INTO boards (id, name, position, rev) VALUES (?, ?, ?, 0)').run(newBoard, name, pos);
+      const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM boards').get() as { p: number }).p;
+      this.sql('INSERT INTO boards (id, name, position, rev) VALUES (?, ?, ?, 0)').run(newBoard, name, pos);
       cols.forEach((c, i) => {
         this.db
           .prepare('INSERT INTO board_columns (id, board_id, name, position, is_done, rev) VALUES (?, ?, ?, ?, ?, 0)')
@@ -425,8 +447,8 @@ export class SqliteBoardRepository implements BoardRepository {
     this.mustBoard(boardId);
     const id = randomUUID();
     return this.mutate('열 추가', [key('column', id)], () => {
-      const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM board_columns WHERE board_id = ?').get(boardId) as { p: number }).p;
-      this.db.prepare('INSERT INTO board_columns (id, board_id, name, position, is_done, rev) VALUES (?, ?, ?, ?, 0, 0)').run(id, boardId, name, pos);
+      const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM board_columns WHERE board_id = ?').get(boardId) as { p: number }).p;
+      this.sql('INSERT INTO board_columns (id, board_id, name, position, is_done, rev) VALUES (?, ?, ?, ?, 0, 0)').run(id, boardId, name, pos);
     });
   }
 
@@ -434,7 +456,7 @@ export class SqliteBoardRepository implements BoardRepository {
     const name = cleanName(rawName, LIMITS.columnName, '열 이름');
     this.mustColumn(id);
     return this.mutate('열 이름 변경', [key('column', id)], () => {
-      this.db.prepare('UPDATE board_columns SET name = ? WHERE id = ?').run(name, id);
+      this.sql('UPDATE board_columns SET name = ? WHERE id = ?').run(name, id);
     });
   }
 
@@ -445,7 +467,7 @@ export class SqliteBoardRepository implements BoardRepository {
     const cands = [key('column', id), ...cardIds.map((c) => key('card', c)), ...this.childKeys(cardIds)];
     return this.mutate('열 삭제', cands, () => {
       this.removeCardsSql(cardIds);
-      this.db.prepare('DELETE FROM board_columns WHERE id = ?').run(id);
+      this.sql('DELETE FROM board_columns WHERE id = ?').run(id);
     });
   }
 
@@ -458,14 +480,14 @@ export class SqliteBoardRepository implements BoardRepository {
       if (j < 0 || j >= cols.length) return;
       const ids = cols.map((c) => c.id);
       [ids[i], ids[j]] = [ids[j], ids[i]];
-      ids.forEach((cid, p) => this.db.prepare('UPDATE board_columns SET position = ? WHERE id = ?').run(p, cid));
+      ids.forEach((cid, p) => this.sql('UPDATE board_columns SET position = ? WHERE id = ?').run(p, cid));
     });
   }
 
   setColumnDone(id: string, done: boolean): Outcome {
     this.mustColumn(id);
     return this.mutate(done ? '완료 열 지정' : '완료 열 해제', [key('column', id)], () => {
-      this.db.prepare('UPDATE board_columns SET is_done = ? WHERE id = ?').run(done ? 1 : 0, id);
+      this.sql('UPDATE board_columns SET is_done = ? WHERE id = ?').run(done ? 1 : 0, id);
     });
   }
 
@@ -476,7 +498,7 @@ export class SqliteBoardRepository implements BoardRepository {
     this.mustColumn(columnId);
     const id = randomUUID();
     return this.mutate('카드 추가', [key('card', id)], () => {
-      const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM cards WHERE column_id = ?').get(columnId) as { p: number }).p;
+      const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM cards WHERE column_id = ?').get(columnId) as { p: number }).p;
       this.insertCardRow({ id, columnId, title, description: '', assignee: '', dueDate: null, repeat: 'none', labels: [], archived: false, position: pos, followupId: null, rev: 0 });
     });
   }
@@ -497,7 +519,7 @@ export class SqliteBoardRepository implements BoardRepository {
     }
     if (f.assignee !== undefined) {
       if (typeof f.assignee !== 'string') throw new AppError('INVALID', '담당자 형식이 올바르지 않아요.');
-      next.assignee = f.assignee.trim().slice(0, 50);
+      next.assignee = [...f.assignee.trim()].slice(0, 50).join('');
     }
     if (f.labels !== undefined) {
       if (!Array.isArray(f.labels) || f.labels.some((l) => !LABEL_COLORS.includes(l))) throw new AppError('INVALID', '라벨 색이 올바르지 않아요.');
@@ -545,12 +567,12 @@ export class SqliteBoardRepository implements BoardRepository {
   }
   private execFollowup(p: Plan) {
     const orig = this.mustCard(p.cardId);
-    const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS q FROM cards WHERE column_id = ?').get(p.colId) as { q: number }).q;
+    const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS q FROM cards WHERE column_id = ?').get(p.colId) as { q: number }).q;
     this.insertCardRow({ ...orig, id: p.newId, columnId: p.colId, dueDate: p.due, repeat: p.repeat, archived: false, position: pos, followupId: null });
     this.checksOf(p.cardId).forEach((ch, i) =>
       this.insertCheckRow({ id: p.checkIds[i], cardId: p.newId, text: ch.text, done: false, position: i }),
     );
-    this.db.prepare('UPDATE cards SET followup_id = ? WHERE id = ?').run(p.newId, p.cardId);
+    this.sql('UPDATE cards SET followup_id = ? WHERE id = ?').run(p.newId, p.cardId);
   }
 
   moveCard(id: string, toColumnId: string, index: number, today?: string): Outcome {
@@ -566,7 +588,7 @@ export class SqliteBoardRepository implements BoardRepository {
       const dst = this.visibleIds(to.id).filter((x) => x !== id);
       const at = Math.max(0, Math.min(Number.isFinite(index) ? Math.trunc(index) : dst.length, dst.length));
       dst.splice(at, 0, id);
-      this.db.prepare('UPDATE cards SET column_id = ? WHERE id = ?').run(to.id, id);
+      this.sql('UPDATE cards SET column_id = ? WHERE id = ?').run(to.id, id);
       this.layoutColumn(to.id, dst);
       if (from.id !== to.id) this.layoutColumn(from.id, this.visibleIds(from.id));
       if (plan) this.execFollowup(plan);
@@ -594,6 +616,7 @@ export class SqliteBoardRepository implements BoardRepository {
   }
 
   setArchived(ids: string[], archived: boolean): Outcome {
+    capIds(ids);
     const cards = [...new Set(ids)].map((i) => this.mustCard(i)).filter((c) => c.archived !== archived);
     const cols = [...new Set(cards.map((c) => c.columnId))];
     const cands = cols.flatMap((c) => this.cardsOf(c).map((x) => key('card', x.id)));
@@ -601,7 +624,7 @@ export class SqliteBoardRepository implements BoardRepository {
       for (const colId of cols) {
         const group = cards.filter((c) => c.columnId === colId).sort((a, b) => a.position - b.position);
         const visible = this.visibleIds(colId);
-        const set = this.db.prepare('UPDATE cards SET archived = ? WHERE id = ?');
+        const set = this.sql('UPDATE cards SET archived = ? WHERE id = ?');
         group.forEach((c) => set.run(archived ? 1 : 0, c.id));
         if (archived) this.layoutColumn(colId, visible.filter((v) => !group.some((g) => g.id === v)));
         else this.layoutColumn(colId, [...visible, ...group.map((g) => g.id)]); // 원래 열의 맨 아래
@@ -610,6 +633,7 @@ export class SqliteBoardRepository implements BoardRepository {
   }
 
   bulkMove(ids: string[], toColumnId: string, today?: string): Outcome {
+    capIds(ids);
     const to = this.mustColumn(toColumnId);
     const colPos = new Map(this.columnsOf(to.boardId).map((c) => [c.id, c]));
     const cards = [...new Set(ids)].map((i) => this.mustCard(i));
@@ -628,7 +652,7 @@ export class SqliteBoardRepository implements BoardRepository {
     ];
     return this.mutate('카드 일괄 이동', cands, () => {
       const existing = this.visibleIds(to.id);
-      const set = this.db.prepare('UPDATE cards SET column_id = ? WHERE id = ?');
+      const set = this.sql('UPDATE cards SET column_id = ? WHERE id = ?');
       moving.forEach((c) => set.run(to.id, c.id));
       this.layoutColumn(to.id, [...existing, ...moving.map((c) => c.id)]);
       srcCols.forEach((s) => this.layoutColumn(s, this.visibleIds(s)));
@@ -637,6 +661,7 @@ export class SqliteBoardRepository implements BoardRepository {
   }
 
   bulkDelete(ids: string[]): Outcome {
+    capIds(ids);
     const cards = [...new Set(ids)].map((i) => this.load(key('card', i)) as Card | undefined).filter((c): c is Card => !!c);
     if (cards.length === 0) throw new AppError('NOT_FOUND', '카드를 찾을 수 없어요. 다른 탭에서 지웠을 수 있어요.', 404);
     const cardIds = cards.map((c) => c.id);
@@ -650,7 +675,7 @@ export class SqliteBoardRepository implements BoardRepository {
     this.mustCard(cardId);
     const id = randomUUID();
     return this.mutate('체크리스트 추가', [key('check', id)], () => {
-      const pos = (this.db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM check_items WHERE card_id = ?').get(cardId) as { p: number }).p;
+      const pos = (this.sql('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM check_items WHERE card_id = ?').get(cardId) as { p: number }).p;
       this.insertCheckRow({ id, cardId, text, done: false, position: pos });
     });
   }
@@ -659,13 +684,13 @@ export class SqliteBoardRepository implements BoardRepository {
     const text = f.text !== undefined ? cleanName(f.text, LIMITS.checkText, '체크리스트 내용') : cur.text;
     const done = f.done !== undefined ? !!f.done : cur.done;
     return this.mutate('체크리스트 수정', [key('check', id)], () => {
-      this.db.prepare('UPDATE check_items SET text = ?, done = ? WHERE id = ?').run(text, done ? 1 : 0, id);
+      this.sql('UPDATE check_items SET text = ?, done = ? WHERE id = ?').run(text, done ? 1 : 0, id);
     });
   }
   deleteCheck(id: string): Outcome {
     this.must<CheckItem>('check', id, '체크리스트 항목');
     return this.mutate('체크리스트 삭제', [key('check', id)], () => {
-      this.db.prepare('DELETE FROM check_items WHERE id = ?').run(id);
+      this.sql('DELETE FROM check_items WHERE id = ?').run(id);
     });
   }
 
@@ -677,7 +702,7 @@ export class SqliteBoardRepository implements BoardRepository {
     const id = randomUUID();
     const ts = new Date(this.now()).toISOString();
     return this.mutate('댓글 작성', [key('comment', id)], () => {
-      this.db.prepare('INSERT INTO comments (id, card_id, body, created_at, updated_at, rev) VALUES (?, ?, ?, ?, ?, 0)').run(id, cardId, body, ts, ts);
+      this.sql('INSERT INTO comments (id, card_id, body, created_at, updated_at, rev) VALUES (?, ?, ?, ?, ?, 0)').run(id, cardId, body, ts, ts);
     });
   }
   updateComment(id: string, rawBody: string): Outcome {
@@ -685,13 +710,13 @@ export class SqliteBoardRepository implements BoardRepository {
     this.must<Comment>('comment', id, '댓글');
     const ts = new Date(this.now()).toISOString();
     return this.mutate('댓글 수정', [key('comment', id)], () => {
-      this.db.prepare('UPDATE comments SET body = ?, updated_at = ? WHERE id = ?').run(body, ts, id);
+      this.sql('UPDATE comments SET body = ?, updated_at = ? WHERE id = ?').run(body, ts, id);
     });
   }
   deleteComment(id: string): Outcome {
     this.must<Comment>('comment', id, '댓글');
     return this.mutate('댓글 삭제', [key('comment', id)], () => {
-      this.db.prepare('DELETE FROM comments WHERE id = ?').run(id);
+      this.sql('DELETE FROM comments WHERE id = ?').run(id);
     });
   }
 
@@ -699,7 +724,7 @@ export class SqliteBoardRepository implements BoardRepository {
 
   addAttachment(cardId: string, meta: AttachmentMeta): Outcome {
     this.mustCard(cardId);
-    const n = (this.db.prepare('SELECT COUNT(*) AS n FROM attachments WHERE card_id = ? AND deleted_at IS NULL').get(cardId) as { n: number }).n;
+    const n = (this.sql('SELECT COUNT(*) AS n FROM attachments WHERE card_id = ? AND deleted_at IS NULL').get(cardId) as { n: number }).n;
     if (n >= LIMITS.attachmentsPerCard) throw new AppError('LIMIT', `첨부파일은 카드당 ${LIMITS.attachmentsPerCard}개까지 올릴 수 있어요.`);
     const id = randomUUID();
     return this.mutate('첨부 추가', [key('attachment', id)], () => {
@@ -709,7 +734,7 @@ export class SqliteBoardRepository implements BoardRepository {
     });
   }
   attachmentCount(cardId: string): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM attachments WHERE card_id = ? AND deleted_at IS NULL').get(cardId) as { n: number }).n;
+    return (this.sql('SELECT COUNT(*) AS n FROM attachments WHERE card_id = ? AND deleted_at IS NULL').get(cardId) as { n: number }).n;
   }
   getAttachment(id: string): Attachment | undefined {
     return this.load(key('attachment', id)) as Attachment | undefined;
@@ -717,32 +742,37 @@ export class SqliteBoardRepository implements BoardRepository {
   deleteAttachment(id: string): Outcome {
     this.must<Attachment>('attachment', id, '첨부파일');
     return this.mutate('첨부 삭제', [key('attachment', id)], () => {
-      this.db.prepare('UPDATE attachments SET deleted_at = ? WHERE id = ?').run(this.now(), id);
+      this.sql('UPDATE attachments SET deleted_at = ? WHERE id = ?').run(this.now(), id);
     });
   }
 
   /** 삭제 표시 후 보관 기간이 지난 첨부 기록을 지우고, 디스크에서 지울 파일 키를 돌려준다 */
   purgeExpiredAttachments(): string[] {
     const cutoff = this.now() - LIMITS.retentionDays * 24 * 60 * 60 * 1000;
-    const rows = this.db.prepare('SELECT storage_key FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ?').all(cutoff) as { storage_key: string }[];
-    this.db.prepare('DELETE FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ?').run(cutoff);
+    const rows = this.sql('SELECT storage_key FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ?').all(cutoff) as { storage_key: string }[];
+    this.sql('DELETE FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at <= ?').run(cutoff);
     return rows.map((r) => r.storage_key);
   }
   referencedStorageKeys(): Set<string> {
-    return new Set((this.db.prepare('SELECT storage_key FROM attachments').all() as { storage_key: string }[]).map((r) => r.storage_key));
+    return new Set((this.sql('SELECT storage_key FROM attachments').all() as { storage_key: string }[]).map((r) => r.storage_key));
   }
 
   // ───────── 알림 닫기 ─────────
+
+  /** 사라진 카드의 알림 닫기 기록을 지운다. 되돌리기 이력이 없는 앱 시작 때만 부른다. */
+  purgeOrphanDismissals(): number {
+    return this.sql('DELETE FROM dismissals WHERE card_id NOT IN (SELECT id FROM cards)').run().changes;
+  }
 
   dismiss(cardId: string, kind: NotifyKind, dueDate: string): Outcome {
     if (!NOTIFY.includes(kind) || !isYmd(dueDate)) throw new AppError('INVALID', '알림 정보가 올바르지 않아요.');
     this.mustCard(cardId);
     const tx = this.db.transaction((): number | null => {
-      const r = this.db.prepare('INSERT OR IGNORE INTO dismissals (card_id, kind, due_date) VALUES (?, ?, ?)').run(cardId, kind, dueDate);
+      const r = this.sql('INSERT OR IGNORE INTO dismissals (card_id, kind, due_date) VALUES (?, ?, ?)').run(cardId, kind, dueDate);
       if (r.changes === 0) return null;
       const revision = this.bumpRevision();
-      this.db.prepare('INSERT INTO changes (revision, kind, entity_id, action) VALUES (?, ?, ?, ?)').run(revision, 'dismissal', `${cardId}|${kind}|${dueDate}`, 'create');
-      this.db.prepare('DELETE FROM changes WHERE revision <= ?').run(revision - this.logLimit);
+      this.sql('INSERT INTO changes (revision, kind, entity_id, action) VALUES (?, ?, ?, ?)').run(revision, 'dismissal', `${cardId}|${kind}|${dueDate}`, 'create');
+      this.sql('DELETE FROM changes WHERE revision <= ?').run(revision - this.logLimit);
       return revision;
     });
     const rev = tx();
@@ -752,11 +782,49 @@ export class SqliteBoardRepository implements BoardRepository {
 
   // ───────── 되돌리기·다시 실행 ─────────
 
+  /** 이 항목이 기대하는 부모의 키 (보드는 없음) */
+  private parentKey(kind: Kind, row: Row): string | null {
+    if (kind === 'column') return key('board', (row as Column).boardId);
+    if (kind === 'card') return key('column', (row as Card).columnId);
+    if (kind === 'check' || kind === 'comment' || kind === 'attachment') return key('card', (row as CheckItem).cardId);
+    return null;
+  }
+  /** 지금 DB에 있는 직접 딸린 항목들의 키 */
+  private childKeysOf(kind: Kind, id: string): string[] {
+    const ids = (sql: string, k: Kind) => (this.sql(sql).all(id) as { id: string }[]).map((r) => key(k, r.id));
+    if (kind === 'board') return ids('SELECT id FROM board_columns WHERE board_id = ?', 'column');
+    if (kind === 'column') return ids('SELECT id FROM cards WHERE column_id = ?', 'card');
+    if (kind === 'card') {
+      return [
+        ...ids('SELECT id FROM check_items WHERE card_id = ?', 'check'),
+        ...ids('SELECT id FROM comments WHERE card_id = ?', 'comment'),
+        ...ids('SELECT id FROM attachments WHERE card_id = ? AND deleted_at IS NULL', 'attachment'),
+      ];
+    }
+    return [];
+  }
+
   applyPatch(patch: Patch, expect: Expect): ApplyResult {
+    assertValidPatch(patch, expect);
     const run = this.db.transaction((): ApplyResult => {
       for (const e of expect) {
         const cur = this.load(e.key);
         if ((cur ? cur.rev : null) !== e.rev) return { conflict: true, reason: 'changed', snapshot: this.snapshot() };
+      }
+      // 다른 탭이 부모를 먼저 지웠거나 자식을 새로 달았다면, 고아 데이터가 생기므로 이 단계를 통째로 건너뛴다
+      const upKeys = new Set(patch.upsert.map((u) => key(u.kind, (u.row as { id: string }).id)));
+      const rmKeys = new Set(patch.remove.map((r) => key(r.kind, r.id)));
+      for (const u of patch.upsert) {
+        const parent = this.parentKey(u.kind, u.row);
+        if (parent && !rmKeys.has(parent) && !upKeys.has(parent) && !this.load(parent)) {
+          return { conflict: true, reason: 'changed', snapshot: this.snapshot() };
+        }
+        if (parent && rmKeys.has(parent)) return { conflict: true, reason: 'changed', snapshot: this.snapshot() };
+      }
+      for (const r of patch.remove) {
+        if (this.childKeysOf(r.kind, r.id).some((c) => !rmKeys.has(c))) {
+          return { conflict: true, reason: 'changed', snapshot: this.snapshot() };
+        }
       }
       if (this.fileExists) {
         for (const u of patch.upsert) {
@@ -765,10 +833,24 @@ export class SqliteBoardRepository implements BoardRepository {
           }
         }
       }
-      const cands = [...patch.upsert.map((u) => key(u.kind, (u.row as { id: string }).id)), ...patch.remove.map((r) => key(r.kind, r.id))];
+      // 되돌린 항목이 들어가는 열·보드는 다른 탭 때문에 위치 번호가 겹칠 수 있다.
+      // 겹쳤을 때만 정리하는데, 정리로 바뀌는 형제 항목도 변경 기록에 남도록 후보에 미리 넣어 둔다.
+      const cardCols = [...new Set(patch.upsert.filter((u) => u.kind === 'card').map((u) => (u.row as Card).columnId))];
+      const colBoards = [...new Set(patch.upsert.filter((u) => u.kind === 'column').map((u) => (u.row as Column).boardId))];
+      const touchBoards = patch.upsert.some((u) => u.kind === 'board');
+      const cands = [
+        ...patch.upsert.map((u) => key(u.kind, (u.row as { id: string }).id)),
+        ...patch.remove.map((r) => key(r.kind, r.id)),
+        ...cardCols.flatMap((c) => this.cardsOf(c).map((x) => key('card', x.id))),
+        ...colBoards.flatMap((b) => this.columnsOf(b).map((x) => key('column', x.id))),
+        ...(touchBoards ? (this.sql('SELECT id FROM boards').all() as { id: string }[]).map((r) => key('board', r.id)) : []),
+      ];
       const out = this.mutate('되돌리기/다시 실행', cands, () => {
         for (const r of patch.remove) this.removeRow(r.kind, r.id);
         for (const u of patch.upsert) this.writeRow(u.kind, u.row);
+        for (const c of cardCols) this.fixDuplicatePositions('cards', 'column_id', c);
+        for (const b of colBoards) this.fixDuplicatePositions('board_columns', 'board_id', b);
+        if (touchBoards) this.fixDuplicatePositions('boards', null, null);
       });
       const touched: Record<string, number | null> = {};
       for (const k of new Set(cands)) {
@@ -780,17 +862,28 @@ export class SqliteBoardRepository implements BoardRepository {
     return run();
   }
 
+  /** 같은 묶음 안에서 위치 번호가 겹친 경우에만, 지금 순서(위치 → id)를 유지한 채 0부터 다시 매긴다. 보관 카드는 보이는 카드 뒤로. */
+  private fixDuplicatePositions(table: 'cards' | 'board_columns' | 'boards', groupCol: string | null, groupId: string | null) {
+    const where = groupCol ? `WHERE ${groupCol} = ?` : '';
+    const args = groupCol ? [groupId] : [];
+    const d = this.sql(`SELECT COUNT(*) AS n, COUNT(DISTINCT position) AS u FROM ${table} ${where}`).get(...args) as { n: number; u: number };
+    if (d.n === d.u) return;
+    if (table === 'cards') return this.layoutColumn(groupId!, this.visibleIds(groupId!));
+    const ids = (this.sql(`SELECT id FROM ${table} ${where} ORDER BY position, id`).all(...args) as { id: string }[]).map((r) => r.id);
+    ids.forEach((id, p) => this.sql(`UPDATE ${table} SET position = ? WHERE id = ?`).run(p, id));
+  }
+
   private removeRow(kind: Kind, id: string) {
     if (kind === 'attachment') {
-      this.db.prepare('UPDATE attachments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(this.now(), id);
+      this.sql('UPDATE attachments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(this.now(), id);
     } else {
-      this.db.prepare(`DELETE FROM ${TABLE[kind]} WHERE id = ?`).run(id);
+      this.sql(`DELETE FROM ${TABLE[kind]} WHERE id = ?`).run(id);
     }
   }
   private writeRow(kind: Kind, row: Row) {
     if (kind === 'board') {
       const b = row as Board;
-      this.db.prepare('INSERT OR REPLACE INTO boards (id, name, position, rev) VALUES (?, ?, ?, ?)').run(b.id, b.name, b.position, b.rev);
+      this.sql('INSERT OR REPLACE INTO boards (id, name, position, rev) VALUES (?, ?, ?, ?)').run(b.id, b.name, b.position, b.rev);
     } else if (kind === 'column') {
       const c = row as Column;
       this.db
@@ -806,10 +899,10 @@ export class SqliteBoardRepository implements BoardRepository {
         .run(c.id, c.columnId, c.title, c.description, c.assignee, c.dueDate, c.repeat, JSON.stringify(c.labels), c.archived ? 1 : 0, c.position, c.followupId, c.rev);
     } else if (kind === 'check') {
       const c = row as CheckItem;
-      this.db.prepare('INSERT OR REPLACE INTO check_items (id, card_id, text, done, position, rev) VALUES (?, ?, ?, ?, ?, ?)').run(c.id, c.cardId, c.text, c.done ? 1 : 0, c.position, c.rev);
+      this.sql('INSERT OR REPLACE INTO check_items (id, card_id, text, done, position, rev) VALUES (?, ?, ?, ?, ?, ?)').run(c.id, c.cardId, c.text, c.done ? 1 : 0, c.position, c.rev);
     } else if (kind === 'comment') {
       const c = row as Comment;
-      this.db.prepare('INSERT OR REPLACE INTO comments (id, card_id, body, created_at, updated_at, rev) VALUES (?, ?, ?, ?, ?, ?)').run(c.id, c.cardId, c.body, c.createdAt, c.updatedAt, c.rev);
+      this.sql('INSERT OR REPLACE INTO comments (id, card_id, body, created_at, updated_at, rev) VALUES (?, ?, ?, ?, ?, ?)').run(c.id, c.cardId, c.body, c.createdAt, c.updatedAt, c.rev);
     } else {
       const a = row as Attachment;
       this.db
@@ -821,18 +914,18 @@ export class SqliteBoardRepository implements BoardRepository {
   // ───────── 다른 탭 동기화 ─────────
 
   changesSince(since: number): Changes {
-    const revision = (this.db.prepare('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
+    const revision = (this.sql('SELECT revision FROM meta WHERE id = 1').get() as { revision: number }).revision;
     if (since >= revision) return { revision, upsert: [], remove: [] };
-    const min = (this.db.prepare('SELECT MIN(revision) AS m FROM changes').get() as { m: number | null }).m;
+    const min = (this.sql('SELECT MIN(revision) AS m FROM changes').get() as { m: number | null }).m;
     if (!Number.isFinite(since) || since < 0 || min === null || since < min - 1) {
       return { revision, full: this.snapshot(), upsert: [], remove: [] };
     }
-    const rows = this.db.prepare('SELECT DISTINCT kind, entity_id FROM changes WHERE revision > ?').all(since) as { kind: string; entity_id: string }[];
+    const rows = this.sql('SELECT DISTINCT kind, entity_id FROM changes WHERE revision > ?').all(since) as { kind: string; entity_id: string }[];
     const out: Changes = { revision, upsert: [], remove: [] };
     for (const r of rows) {
       if (r.kind === 'dismissal') {
         const [cardId, kind, dueDate] = r.entity_id.split('|');
-        const ex = this.db.prepare('SELECT 1 FROM dismissals WHERE card_id = ? AND kind = ? AND due_date = ?').get(cardId, kind, dueDate);
+        const ex = this.sql('SELECT 1 FROM dismissals WHERE card_id = ? AND kind = ? AND due_date = ?').get(cardId, kind, dueDate);
         if (ex) out.upsert.push({ kind: 'dismissal', row: { cardId, kind, dueDate } });
         else out.remove.push({ kind: 'dismissal', id: r.entity_id });
         continue;

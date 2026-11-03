@@ -384,6 +384,63 @@ describe('반복 마감', () => {
   });
 });
 
+describe('중간에 실패해도 일부만 저장되지 않는다 (일부러 실패시켜 확인)', () => {
+  const snap = () => JSON.stringify({ ...repo.snapshot() });
+  it('일괄 이동: 두 번째 후속 카드를 만드는 도중 오류가 나면 전체가 원래대로 돌아간다', () => {
+    const a = mk('A');
+    const b = mk('B');
+    for (const id of [a, b]) repo.updateCard(id, { dueDate: '2026-11-05', repeat: 'daily' });
+    const before = snap();
+    let calls = 0;
+    const real = (repo as any).execFollowup.bind(repo);
+    (repo as any).execFollowup = (p: unknown) => {
+      if (++calls === 2) throw new Error('일부러 낸 오류');
+      return real(p);
+    };
+    expect(() => repo.bulkMove([a, b], cols[2].id, TODAY)).toThrow('일부러 낸 오류');
+    (repo as any).execFollowup = real;
+    expect(snap()).toBe(before); // 카드 위치·후속 카드·번호 모두 그대로
+  });
+  it('열 삭제·보드 삭제·복제: 도중 오류가 나면 아무것도 바뀌지 않는다', () => {
+    mk('A');
+    repo.addComment(repo.snapshot().cards[0].id, '댓글');
+    const before = snap();
+    const real = (repo as any).removeCardsSql.bind(repo);
+    (repo as any).removeCardsSql = (ids: string[]) => {
+      real(ids);
+      throw new Error('삭제 도중 오류');
+    };
+    expect(() => repo.deleteBoard(board)).toThrow('삭제 도중 오류');
+    expect(() => repo.deleteColumn(cols[0].id)).toThrow('삭제 도중 오류');
+    (repo as any).removeCardsSql = real;
+    expect(snap()).toBe(before);
+    const realInsert = (repo as any).insertCardRow.bind(repo);
+    (repo as any).insertCardRow = () => {
+      throw new Error('복제 도중 오류');
+    };
+    expect(() => repo.duplicateBoard(board)).toThrow('복제 도중 오류');
+    expect(() => repo.duplicateCard(repo.snapshot().cards[0].id)).toThrow('복제 도중 오류');
+    (repo as any).insertCardRow = realInsert;
+    expect(snap()).toBe(before);
+  });
+  it('되돌리기 적용 도중 오류가 나도 일부만 적용되지 않는다', () => {
+    const id = mk('A');
+    repo.addCheck(id, '항목');
+    const del = repo.deleteCard(id);
+    const before = snap();
+    const real = (repo as any).writeRow.bind(repo);
+    let n = 0;
+    (repo as any).writeRow = (k: any, row: any) => {
+      if (++n === 2) throw new Error('복원 도중 오류');
+      return real(k, row);
+    };
+    expect(() => repo.applyPatch(del.entry!.inverse, del.entry!.expect)).toThrow('복원 도중 오류');
+    (repo as any).writeRow = real;
+    expect(snap()).toBe(before);
+    expect(repo.applyPatch(del.entry!.inverse, del.entry!.expect).conflict).toBe(false); // 이후 정상 복원 가능
+  });
+});
+
 describe('첨부 파일', () => {
   const att = (cardId: string, key: string, name = 'a.txt') => {
     files.add(key);
@@ -471,7 +528,7 @@ describe('첨부 파일', () => {
 });
 
 describe('알림 닫기 기록', () => {
-  it('같은 알림은 한 번만 기록하고, 카드를 지우면 기록도 지운다', () => {
+  it('같은 알림은 한 번만 기록하고, 카드를 지우면 기록은 시작 때 정리된다', () => {
     const id = mk('a');
     repo.updateCard(id, { dueDate: '2026-11-03' });
     const r0 = repo.snapshot().revision;
@@ -480,6 +537,9 @@ describe('알림 닫기 기록', () => {
     expect(repo.snapshot().dismissals).toEqual([{ cardId: id, kind: 'today', dueDate: '2026-11-03' }]);
     expect(repo.snapshot().revision).toBe(r0 + 1);
     repo.deleteCard(id);
+    // 되돌리기로 카드가 돌아와도 닫은 알림이 되살아나지 않게, 기록은 바로 지우지 않고 앱 시작 때 정리한다
+    expect(repo.snapshot().dismissals).toHaveLength(1);
+    expect(repo.purgeOrphanDismissals()).toBe(1);
     expect(repo.snapshot().dismissals).toHaveLength(0);
   });
 });

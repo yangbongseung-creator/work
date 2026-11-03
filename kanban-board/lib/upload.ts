@@ -67,3 +67,16 @@ export function contentDisposition(name: string, inline: boolean): string {
   const ascii = safe.replace(/[^\x20-\x7e]/g, '_');
   return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
 }
+
+/**
+ * 저장할 파일명(200자 제한). 길면 확장자는 남기고 앞부분을 자른다.
+ * 검사도 이 이름으로 해야, 잘리기 전/후 확장자가 달라지는 우회가 생기지 않는다.
+ */
+export function normalizeUploadName(name: string, max = 200): string {
+  const n = name.trim();
+  const cps = [...n];
+  if (cps.length <= max) return n;
+  const dot = n.lastIndexOf('.');
+  const ext = dot >= 0 && n.length - dot <= 11 ? n.slice(dot) : '';
+  return [...n.slice(0, dot >= 0 && ext ? dot : n.length)].slice(0, max - [...ext].length).join('') + ext;
+}

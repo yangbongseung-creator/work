@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { getRepo, getStorage, handle } from '../../../lib/server';
-import { validateUpload } from '../../../lib/upload';
+import { normalizeUploadName, validateUpload } from '../../../lib/upload';
 import { AppError, LIMITS } from '../../../lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -15,7 +15,7 @@ export async function POST(req: Request) {
       throw new AppError('INVALID', '요청 형식이 올바르지 않아요.');
     }
     const cardId = typeof body?.cardId === 'string' ? body.cardId : '';
-    const name = typeof body?.name === 'string' ? body.name.trim() : '';
+    const name = typeof body?.name === 'string' ? normalizeUploadName(body.name) : ''; // 저장될 이름 기준으로 검사한다
     const data = typeof body?.data === 'string' ? body.data : '';
     if (!cardId || !name || !data) throw new AppError('INVALID', '파일 정보가 부족해요.');
     // 서버에서도 개수·크기를 검사한다 (화면 검사에만 기대지 않는다)
@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     const storageKey = randomUUID(); // 저장 이름은 새 ID, 원래 파일명은 DB에만 둔다
     await storage.put(storageKey, bytes);
     try {
-      return repo.addAttachment(cardId, { name: [...name].slice(0, 200).join(''), size: bytes.length, mime, storageKey });
+      return repo.addAttachment(cardId, { name, size: bytes.length, mime, storageKey });
     } catch (e) {
       await storage.remove(storageKey); // 실패하면 남은 파일을 지운다
       throw e;

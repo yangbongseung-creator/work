@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/core';
 import { arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { History } from '../lib/history';
-import { NO_ASSIGNEE, emptyFilters, groupByDue, hasFilters, matchCard, type Filters } from '../lib/filter';
+import { emptyFilters, groupByDue, hasFilters, matchCard, type Filters } from '../lib/filter';
 import { computeNotices, NOTICE_TEXT, type Notice } from '../lib/notices';
 import { applyChanges } from '../lib/sync';
 import { LABEL_COLORS, LABEL_NAMES, LIMITS, type Card, type Column, type LabelColor, type Patch, type Snapshot } from '../lib/types';
@@ -69,6 +69,10 @@ export function App() {
 
   /** 새 데이터를 받으면 화면 갱신을 기다리지 않고 ref도 바로 맞춘다 (직후 코드가 최신 값을 보게) */
   const commit = useCallback((s: Snapshot) => {
+    // 늦게 도착한 옛 응답이 이미 반영된 최신 상태(다른 탭의 변경 포함)를 덮어쓰지 않게 한다.
+    // 서버의 번호가 클수록 더 많은 변경을 담고 있으므로, 같거나 더 큰 번호만 받아들인다.
+    const cur = snapRef.current;
+    if (cur && s.revision < cur.revision) return;
     snapRef.current = s;
     setSnap(s);
   }, []);
@@ -83,12 +87,12 @@ export function App() {
 
   const load = useCallback(async () => {
     try {
-      setSnap(await fetchState());
+      commit(await fetchState());
       setLoadError(null);
     } catch (e) {
       setLoadError((e as Error).message);
     }
-  }, []);
+  }, [commit]);
   useEffect(() => {
     load();
     const t = store(THEME_KEY);
@@ -137,19 +141,29 @@ export function App() {
 
   // ───────── 여러 탭 동기화 (SSE + 재연결 시 이어받기) ─────────
 
+  const catchUpAgain = useRef(false);
   const catchUp = useCallback(async () => {
-    const cur = snapRef.current;
-    if (!cur || syncing.current) return;
+    // 이미 가져오는 중에 새 알림이 오면 버리지 않고, 끝난 뒤 한 번 더 확인한다
+    if (syncing.current) {
+      catchUpAgain.current = true;
+      return;
+    }
     syncing.current = true;
     try {
-      const ch = await fetchChanges(cur.revision);
-      setSnap((prev) => (prev && prev.revision < ch.revision ? applyChanges(prev, ch) : prev));
+      do {
+        catchUpAgain.current = false;
+        const cur = snapRef.current;
+        if (!cur) break;
+        const ch = await fetchChanges(cur.revision);
+        const latest = snapRef.current;
+        if (latest && latest.revision < ch.revision) commit(applyChanges(latest, ch));
+      } while (catchUpAgain.current);
     } catch {
-      /* 다음 알림 때 다시 시도 */
+      /* 다음 알림이나 재연결 때 다시 시도 */
     } finally {
       syncing.current = false;
     }
-  }, []);
+  }, [commit]);
   const hasSnap = snap !== null;
   useEffect(() => {
     if (!hasSnap) return;
@@ -222,13 +236,15 @@ export function App() {
         bump((n) => n + 1);
         return true;
       } catch (e) {
-        if (prev) commit(prev);
+        // 그 사이 다른 탭의 변경이 반영되어 번호가 앞서갔다면, 옛 상태로 되돌리면 최신 내용을 잃으므로 서버에서 다시 받는다
+        if (prev && snapRef.current && snapRef.current.revision === prev.revision) commit(prev);
+        else void load();
         setStatus('error');
         showToast((e as Error).message);
         return false;
       }
     },
-    [showToast, commit],
+    [showToast, commit, load],
   );
 
   const doUpload = useCallback(async (cardId: string, file: File) => {
@@ -725,14 +741,18 @@ export function App() {
           </div>
           <span className="menu" onClick={(e) => e.stopPropagation()}>
             <button aria-haspopup="true" aria-expanded={menu === 'assignee'} onClick={() => setMenu(menu === 'assignee' ? null : 'assignee')}>
-              담당자{filters.assignees.length > 0 ? ` (${filters.assignees.length})` : ''} ▾
+              담당자{filters.assignees.length + (filters.noAssignee ? 1 : 0) > 0 ? ` (${filters.assignees.length + (filters.noAssignee ? 1 : 0)})` : ''} ▾
             </button>
             {menu === 'assignee' && (
               <div className="menu-pop left" role="group" aria-label="담당자 필터">
-                {[NO_ASSIGNEE, ...assignees].map((a) => (
+                <label className="check-opt">
+                  <input type="checkbox" checked={filters.noAssignee} onChange={(e) => setFilters((f) => ({ ...f, noAssignee: e.target.checked }))} />
+                  담당자 없음
+                </label>
+                {assignees.map((a) => (
                   <label key={a} className="check-opt">
                     <input type="checkbox" checked={filters.assignees.includes(a)} onChange={() => toggleAssigneeFilter(a)} />
-                    {a === NO_ASSIGNEE ? '담당자 없음' : a}
+                    {a}
                   </label>
                 ))}
               </div>
@@ -905,7 +925,11 @@ export function App() {
           comments={snap.comments.filter((c) => c.cardId === openCard.id)}
           attachments={snap.attachments.filter((a) => a.cardId === openCard.id)}
           status={status}
-          onSave={(fields) => run({ op: 'updateCard', id: openCard.id, fields })}
+          onSave={async (fields) => {
+            const ok = await run({ op: 'updateCard', id: openCard.id, fields });
+            if (ok && fields.dueDate === null && openCard.repeat !== 'none') showToast('마감일이 없어서 반복을 "없음"으로 바꿨어요.');
+            return ok;
+          }}
           onMoveTo={(toColumnId) => run({ op: 'moveCard', id: openCard.id, toColumnId, index: 9999 })}
           act={run}
           onUpload={(file) => doUpload(openCard.id, file)}

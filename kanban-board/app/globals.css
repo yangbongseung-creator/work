@@ -564,3 +564,7 @@ hr { border: none; border-top: 1px solid var(--line); width: 100%; }
   .filterbar .search { min-width: 0; flex: 1; }
   .bell-pop { min-width: 260px; }
 }
+
+/* 끄는 중인 카드가 들어갈 자리를 보여주는 삽입 표시 */
+.card-wrap.dragging { border-top: 3px solid var(--accent); border-radius: 4px; padding-top: 2px; }
+.card-wrap.dragging .card { border-style: dashed; }

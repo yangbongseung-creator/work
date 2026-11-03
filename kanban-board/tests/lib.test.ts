@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { nextDueDate, addDays, isYmd } from '../lib/dates';
-import { matchCard, groupByDue, NO_ASSIGNEE, hasFilters } from '../lib/filter';
+import { matchCard, groupByDue, hasFilters } from '../lib/filter';
 import { computeNotices } from '../lib/notices';
 import { validateUpload, safeDownloadName, contentDisposition, inlineMime } from '../lib/upload';
 import { applyChanges } from '../lib/sync';
@@ -45,26 +45,33 @@ describe('검색·필터', () => {
   const a = card({ title: 'Report 작성', description: '분기 보고', assignee: '김', labels: ['red'] });
   const b = card({ title: '디자인', assignee: '', labels: ['blue', 'red'] });
   it('제목·설명 부분 일치, 영문 대소문자 구분 없음', () => {
-    expect(matchCard(a, { query: 'report', labels: [], assignees: [] })).toBe(true);
-    expect(matchCard(a, { query: '분기', labels: [], assignees: [] })).toBe(true);
-    expect(matchCard(a, { query: '없는말', labels: [], assignees: [] })).toBe(false);
+    expect(matchCard(a, { query: 'report', labels: [], assignees: [], noAssignee: false })).toBe(true);
+    expect(matchCard(a, { query: '분기', labels: [], assignees: [], noAssignee: false })).toBe(true);
+    expect(matchCard(a, { query: '없는말', labels: [], assignees: [], noAssignee: false })).toBe(false);
   });
   it('라벨은 선택한 색 중 하나라도 있으면 일치', () => {
-    expect(matchCard(b, { query: '', labels: ['green', 'blue'], assignees: [] })).toBe(true);
-    expect(matchCard(b, { query: '', labels: ['green'], assignees: [] })).toBe(false);
+    expect(matchCard(b, { query: '', labels: ['green', 'blue'], assignees: [], noAssignee: false })).toBe(true);
+    expect(matchCard(b, { query: '', labels: ['green'], assignees: [], noAssignee: false })).toBe(false);
   });
   it('담당자 없음을 별도 선택지로 고를 수 있다', () => {
-    expect(matchCard(b, { query: '', labels: [], assignees: [NO_ASSIGNEE] })).toBe(true);
-    expect(matchCard(a, { query: '', labels: [], assignees: [NO_ASSIGNEE] })).toBe(false);
-    expect(matchCard(a, { query: '', labels: [], assignees: [NO_ASSIGNEE, '김'] })).toBe(true);
+    expect(matchCard(b, { query: '', labels: [], assignees: [], noAssignee: true })).toBe(true);
+    expect(matchCard(a, { query: '', labels: [], assignees: [], noAssignee: true })).toBe(false);
+    expect(matchCard(a, { query: '', labels: [], assignees: ['김'], noAssignee: true })).toBe(true);
+  });
+  it('담당자 이름이 "__none__"이어도 "담당자 없음"과 섞이지 않는다', () => {
+    const odd = card({ assignee: '__none__' });
+    expect(matchCard(odd, { query: '', labels: [], assignees: [], noAssignee: true })).toBe(false);
+    expect(matchCard(odd, { query: '', labels: [], assignees: ['__none__'], noAssignee: false })).toBe(true);
+    expect(matchCard(card({ assignee: '' }), { query: '', labels: [], assignees: ['__none__'], noAssignee: false })).toBe(false);
   });
   it('조건은 AND로 결합한다', () => {
-    expect(matchCard(a, { query: 'report', labels: ['blue'], assignees: [] })).toBe(false);
-    expect(matchCard(a, { query: 'report', labels: ['red'], assignees: ['김'] })).toBe(true);
+    expect(matchCard(a, { query: 'report', labels: ['blue'], assignees: [], noAssignee: false })).toBe(false);
+    expect(matchCard(a, { query: 'report', labels: ['red'], assignees: ['김'], noAssignee: false })).toBe(true);
   });
   it('검색어 없이 필터만 써도 된다', () => {
-    expect(hasFilters({ query: '  ', labels: [], assignees: [] })).toBe(false);
-    expect(hasFilters({ query: '', labels: ['red'], assignees: [] })).toBe(true);
+    expect(hasFilters({ query: '  ', labels: [], assignees: [], noAssignee: false })).toBe(false);
+    expect(hasFilters({ query: '', labels: ['red'], assignees: [], noAssignee: false })).toBe(true);
+    expect(hasFilters({ query: '', labels: [], assignees: [], noAssignee: true })).toBe(true);
   });
 });
 

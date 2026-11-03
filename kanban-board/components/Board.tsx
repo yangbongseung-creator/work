@@ -70,7 +70,7 @@ export function SortableCard(props: {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: card.id, disabled: props.disabled });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 };
   return (
-    <div ref={setNodeRef} style={style} className="card-wrap">
+    <div ref={setNodeRef} style={style} className={`card-wrap ${isDragging ? 'dragging' : ''}`}>
       <div
         {...attributes}
         {...listeners}
@@ -182,7 +182,7 @@ export function ColumnView(props: {
           <button disabled={props.index === props.total - 1} onClick={() => props.onMove(1)}>
             오른쪽으로 이동 →
           </button>
-          <button className="danger" onClick={props.onDelete}>
+          <button className="danger" disabled={props.total <= 1} title={props.total <= 1 ? '마지막 남은 열은 삭제할 수 없어요' : ''} onClick={props.onDelete}>
             열 삭제
           </button>
         </Menu>

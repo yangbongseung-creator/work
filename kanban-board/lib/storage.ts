@@ -9,6 +9,8 @@ export interface StorageAdapter {
   remove(key: string): Promise<void>;
   exists(key: string): boolean;
   list(): string[];
+  /** 파일이 만들어진 지 몇 ms 지났는지 (없으면 알 수 없음) */
+  ageMs?(key: string): number;
 }
 
 /** 내 PC의 data/uploads 폴더에 저장 */
@@ -17,7 +19,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     fs.mkdirSync(dir, { recursive: true });
   }
   private file(key: string) {
-    if (!/^[0-9a-f-]{36}$/.test(key)) throw new Error('잘못된 저장 키');
+    if (!/^[0-9a-f-]{36}(\.tmp)?$/.test(key)) throw new Error('잘못된 저장 키');
     return path.join(this.dir, key);
   }
   async put(key: string, data: Buffer) {
@@ -46,6 +48,13 @@ export class LocalStorageAdapter implements StorageAdapter {
   list() {
     return fs.readdirSync(this.dir);
   }
+  ageMs(key: string) {
+    try {
+      return Date.now() - fs.statSync(this.file(key)).mtimeMs;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
 }
 
 export interface CleanupRepo {
@@ -67,10 +76,13 @@ export async function cleanupStorage(repo: CleanupRepo, storage: StorageAdapter)
   const referenced = repo.referencedStorageKeys();
   for (const key of storage.list()) {
     if (!referenced.has(key)) {
+      // 방금 올라온 파일은 아직 DB에 기록되기 전일 수 있으니 건드리지 않는다
+      if (storage.ageMs && storage.ageMs(key) < YOUNG_FILE_MS) continue;
       await storage.remove(key);
       removed.push(key);
     }
   }
   return removed;
 }
+const YOUNG_FILE_MS = 5 * 60 * 1000;
 export const RETENTION_MS = LIMITS.retentionDays * 24 * 60 * 60 * 1000;

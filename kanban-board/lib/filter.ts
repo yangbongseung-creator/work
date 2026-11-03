@@ -1,13 +1,11 @@
 import type { Card, Column, LabelColor } from './types';
 
-/** 담당자 필터에서 "담당자 없음"을 뜻하는 특별한 값 */
-export const NO_ASSIGNEE = '__none__';
-
-export type Filters = { query: string; labels: LabelColor[]; assignees: string[] };
-export const emptyFilters: Filters = { query: '', labels: [], assignees: [] };
+/** noAssignee는 "담당자 없음" 선택지. 실제 담당자 이름과 섞이지 않게 별도 칸으로 둔다. */
+export type Filters = { query: string; labels: LabelColor[]; assignees: string[]; noAssignee: boolean };
+export const emptyFilters: Filters = { query: '', labels: [], assignees: [], noAssignee: false };
 
 export function hasFilters(f: Filters): boolean {
-  return f.query.trim() !== '' || f.labels.length > 0 || f.assignees.length > 0;
+  return f.query.trim() !== '' || f.labels.length > 0 || f.assignees.length > 0 || f.noAssignee;
 }
 
 /** 검색 AND 라벨(하나라도) AND 담당자(하나라도) */
@@ -15,8 +13,8 @@ export function matchCard(card: Card, f: Filters): boolean {
   const q = f.query.trim().toLowerCase();
   if (q && !card.title.toLowerCase().includes(q) && !card.description.toLowerCase().includes(q)) return false;
   if (f.labels.length > 0 && !f.labels.some((l) => card.labels.includes(l))) return false;
-  if (f.assignees.length > 0) {
-    const ok = f.assignees.some((a) => (a === NO_ASSIGNEE ? card.assignee === '' : card.assignee === a));
+  if (f.assignees.length > 0 || f.noAssignee) {
+    const ok = (f.noAssignee && card.assignee === '') || f.assignees.includes(card.assignee);
     if (!ok) return false;
   }
   return true;

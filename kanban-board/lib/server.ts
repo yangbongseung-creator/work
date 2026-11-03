@@ -53,6 +53,7 @@ export function getRepo(): SqliteBoardRepository {
       onCommit: (rev) => feed.publish(rev),
     });
     repo.ensureFirstBoard();
+    repo.purgeOrphanDismissals();
     state.repo = repo;
     // 앱 시작 시 정리: 보관 기간이 지난 첨부, 어디에서도 쓰지 않는 고아 파일
     cleanupStorage(repo, storage).catch((e) => console.error('첨부 정리 실패', e));
