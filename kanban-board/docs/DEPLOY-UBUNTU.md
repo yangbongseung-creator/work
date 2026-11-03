@@ -30,6 +30,7 @@
 
 - 관리자 → kanban으로 바꾸기: `sudo -iu kanban`
 - kanban → 관리자로 돌아가기: `exit`
+- 명령에 나오는 `~`는 **"지금 계정의 집 폴더"** 라는 뜻이에요. kanban 상태에서는 `/home/kanban-board`(앱 폴더)이고, 관리자 상태에서는 `/home/내계정`이에요. 그래서 `bash ~/deploy/…` 명령은 **반드시 kanban 상태에서** 실행해야 해요.
 - **kanban 상태에서는 어떤 명령에도 `sudo`를 붙이지 마세요.** 비밀번호를 물어도 답할 수 없고(kanban에는 비밀번호가 없음), 억지로 관리자 권한으로 실행하면 파일 주인이 꼬여 나중에 `Permission denied`, `EACCES`, `dubious ownership` 같은 오류가 납니다. (이미 그랬다면 [문제 해결](#문제-해결)의 첫 줄을 보세요.)
 
 **2) 명령은 한 줄(또는 한 덩어리)씩 붙여 넣으세요.** 특히 `sudo -iu kanban`은 **반드시 그 줄만** 실행하고, 프롬프트가 `kanban@…`으로 바뀐 것을 본 뒤 다음으로 가세요. (여러 줄을 한꺼번에 붙여 넣으면 뒷줄이 비밀번호 입력으로 먹히거나 엉뚱한 계정으로 실행됩니다.)
@@ -481,6 +482,7 @@ bash ~/deploy/start.sh
 | 증상 | 확인할 것 |
 |---|---|
 | `Permission denied`, `EACCES`, `dubious ownership`, `Build directory is not writeable`, 또는 스크립트가 "지금 사용자의 것이 아닌 파일이 있어요" | `sudo`를 붙여 실행한 적이 있으면 생겨요. 관리자 상태에서 `sudo chown -R kanban:kanban /home/kanban-board` 후 kanban 상태로 다시 |
+| `bash ~/deploy/…`가 `No such file or directory` | 오류에 나온 경로를 보세요. ① `/home/내계정/deploy/…` → 관리자 상태에서 실행한 것. `sudo -iu kanban` 후 다시 ② `/home/kanban-board/deploy/…` → 예전 판으로 설치해서 `deploy` 폴더가 없는 것. [업데이트하는 방법](#업데이트하는-방법)의 "처음 한 번만" 두 줄을 먼저 ③ 그 밖의 경로 → kanban 계정의 집 폴더가 다르게 만들어진 것. 관리자 상태에서 `getent passwd kanban`을 확인하세요 (3단계) |
 | `tmux attach -t kanban`이 `no server running` / `can't find session` | 앱이 꺼져 있거나, 내가 지금 관리자 상태예요. `sudo -iu kanban` → `bash ~/deploy/start.sh` |
 | `duplicate session: kanban` | 이미 tmux 창이 있어요. `tmux attach -t kanban`으로 들어가 보세요 |
 | start.sh: "3000번 포트를 다른 프로그램이 쓰고 있어요" | 예전 방식으로 켠 앱이 남아 있을 수 있어요. [예전 설치 정리](#업데이트하는-방법)를 보세요. 확인: 관리자 상태에서 `sudo ss -tlnp \| grep :3000` |
