@@ -6,7 +6,8 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: Request) {
   const blocked = await guardRequest(req);
   if (blocked) return blocked;
-  getRepo(); // 저장소를 먼저 열어 둔다
+  const repo = await getRepo(); // 저장소를 먼저 열어 둔다 (연결 설정이 틀리면 여기서 알려준다)
+  const firstRevision = (await repo.snapshot()).revision;
   const enc = new TextEncoder();
   let unsubscribe = () => {};
   let ping: ReturnType<typeof setInterval> | undefined;
@@ -20,7 +21,7 @@ export async function GET(req: Request) {
         }
       };
       send(`retry: 2000\n\n`);
-      send(`event: change\ndata: ${getRepo().snapshot().revision}\n\n`);
+      send(`event: change\ndata: ${firstRevision}\n\n`);
       const close = () => {
         if (ping) clearInterval(ping);
         try {

@@ -58,8 +58,8 @@ export class LocalStorageAdapter implements StorageAdapter {
 }
 
 export interface CleanupRepo {
-  purgeExpiredAttachments(): string[];
-  referencedStorageKeys(): Set<string>;
+  purgeExpiredAttachments(): Promise<string[]>;
+  referencedStorageKeys(): Promise<Set<string>>;
 }
 
 /**
@@ -69,11 +69,11 @@ export interface CleanupRepo {
  */
 export async function cleanupStorage(repo: CleanupRepo, storage: StorageAdapter): Promise<string[]> {
   const removed: string[] = [];
-  for (const key of repo.purgeExpiredAttachments()) {
+  for (const key of await repo.purgeExpiredAttachments()) {
     await storage.remove(key);
     removed.push(key);
   }
-  const referenced = repo.referencedStorageKeys();
+  const referenced = await repo.referencedStorageKeys();
   for (const key of storage.list()) {
     if (!referenced.has(key)) {
       // 방금 올라온 파일은 아직 DB에 기록되기 전일 수 있으니 건드리지 않는다

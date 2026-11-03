@@ -2,6 +2,7 @@
 
 카드를 끌어서 옮기는 업무 보드 앱입니다. 지금은 **내 PC에서만** 실행합니다 (`127.0.0.1`, 외부 공개 안 함).
 사양서 v3의 1~6단계를 모두 구현했습니다.
+지금은 **내 PC에서 쓰는 SQLite 버전이 아니라 PostgreSQL 버전**입니다. (SQLite 버전은 GitHub 기록의 `280a1fc` 커밋까지입니다.)
 
 ## 할 수 있는 것
 
@@ -21,49 +22,51 @@
 | 여러 탭 | 같은 PC의 여러 탭이 실시간으로 같은 내용을 보여줌, 끊기면 자동 재연결 |
 | 테마 | 시스템 / 밝게 / 어둡게 |
 
-## 내 PC에서 실행하기 (Windows 기준)
+## 설치와 실행
 
-1. **Node.js 설치**: https://nodejs.org 에서 LTS 버전 설치 (이미 있으면 건너뜀)
-2. PowerShell을 열고 아래를 한 줄씩 실행합니다.
+데이터는 **PostgreSQL**에 저장합니다. 우분투 서버에 설치하는 방법은 **[docs/DEPLOY-UBUNTU.md](docs/DEPLOY-UBUNTU.md)** 에 처음부터 끝까지 적어 두었습니다.
 
-```powershell
-git clone https://github.com/yangbongseung-creator/work
-cd work\kanban-board
-npm install
-npm run dev
-```
+요약하면 이렇습니다.
 
-3. 브라우저에서 **http://127.0.0.1:3000** 을 엽니다. (`localhost:3000`도 됩니다)
-4. 끌 때는 PowerShell 창에서 `Ctrl+C`.
+| 단계 | 내용 |
+|---|---|
+| 1 | `git`, `curl`, `postgresql`, Node.js 22 설치 |
+| 2 | PostgreSQL에 `kanban` 사용자와 데이터베이스 만들기 |
+| 3 | 코드 받기 → `cp .env.example .env` → `DATABASE_URL` 채우기 |
+| 4 | `npm ci` → `npm run build` → `npm start` |
+| 5 | 내 PC에서 `ssh -L 3000:127.0.0.1:3000 ...` 로 터널을 열고 `http://127.0.0.1:3000` 접속 |
 
 ## 데이터가 저장되는 곳
 
 | 내용 | 위치 |
 |---|---|
-| 보드·카드 등 | `data/kanban.db` |
+| 보드·카드 등 | PostgreSQL (`.env`의 `DATABASE_URL`) |
 | 첨부 파일 | `data/uploads/` (파일 이름은 새 ID로 저장되고, 원래 이름은 DB에 있음) |
 
-`data/` 폴더는 GitHub에 올라가지 않습니다. **백업 기능은 이번 범위에 없어서**, 중요한 데이터는 이 폴더를 직접 복사해 두세요.
+`data/` 폴더와 `.env`는 GitHub에 올라가지 않습니다. **백업 기능은 앱에 없어서**, 안내서의 백업 방법(`pg_dump` + 첨부 폴더 복사)으로 직접 백업하세요.
 삭제한 첨부는 7일 동안 파일을 남겨 두었다가 앱을 시작할 때 지웁니다.
 
 ## 테스트
 
-```powershell
+시험에는 PostgreSQL이 필요합니다. 시험용 데이터베이스를 하나 만들고 주소를 알려 주세요. 시험은 매번 독립된 스키마(칸막이)를 만들었다가 지우므로 기존 데이터에 영향을 주지 않습니다.
+
+```bash
+export TEST_DATABASE_URL=postgres://사용자:비밀번호@127.0.0.1:5432/시험용DB이름
 npm test
 ```
 
 `npm test`에는 무작위 연산 시험(퍼징)도 들어 있어요. 보드·열·카드·체크리스트·댓글·첨부 작업을 무작위로 섞어 실행하면서
 "데이터가 망가지지 않는지", "전부 되돌리면 처음으로 돌아오는지", "다른 탭이 끼어들어도 안전한지"를 확인합니다.
-더 크게 돌려 보려면 (PowerShell):
+더 크게 돌려 보려면:
 
-```powershell
-$env:FUZZ_SEEDS=2000; $env:FUZZ_STEPS=120; npm test
+```bash
+FUZZ_SEEDS=300 FUZZ_STEPS=100 npm test
 ```
 
 ## 알아둘 점
 
 - 로그인이 없습니다. 대신 **다른 웹사이트가 내 서버를 건드리지 못하게** `Host`·`Origin` 검사와 JSON 전용 요청 규칙을 둡니다. 인증이 들어갈 자리는 `lib/auth.ts` 입니다.
-- 다른 포트로 실행하려면 `KANBAN_ALLOWED_PORTS` 환경변수에 그 포트 번호를 넣어야 합니다 (보안 검사 때문입니다).
+- SSH 터널의 내 PC 쪽 포트를 3000이 아닌 번호로 쓰려면 `KANBAN_ALLOWED_PORTS`에 그 번호를 추가해야 합니다 (보안 검사 때문입니다).
 - 되돌리기 이력은 탭 메모리에만 저장되어 새로고침하면 사라집니다.
 - 같은 네트워크의 다른 기기에서는 접속할 수 없습니다 (사양서 제외 항목).
-- 나중에 Vercel + Supabase로 옮길 때 바꿀 자리: `lib/repository.ts`(DB), `lib/storage.ts`(첨부), `lib/feed.ts`(실시간).
+- 다른 저장소로 바꿀 때 갈아 끼울 자리: `lib/repository.ts`(DB, 지금은 PostgreSQL), `lib/storage.ts`(첨부), `lib/feed.ts`(실시간 알림, 지금은 서버 안에서만 전달하므로 **앱은 한 개의 프로세스로만 실행**하세요).

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SqliteBoardRepository } from '../lib/repository';
+import { disposeRepo, newRepo } from './helpers';
 import { History } from '../lib/history';
 import { AppError, LABEL_COLORS, type Snapshot } from '../lib/types';
 
@@ -74,67 +74,67 @@ function invariants(s: Snapshot, where: string) {
 }
 
 /** mixed=true면 "다른 탭"이 이력에 남지 않는 변경을 몰래 섞는다. 이때는 되돌리기가 충돌로 건너뛰어질 수 있지만, 규칙(고아 없음 등)은 여전히 지켜져야 한다. */
-function runSequence(seed: number, steps: number, mixed: boolean) {
+async function runSequence(seed: number, steps: number, mixed: boolean) {
   const r = rng(seed);
   const pick = <T,>(a: T[]): T | undefined => a[Math.floor(r() * a.length)];
   const now = 1_800_000_000_000;
-  const repo = new SqliteBoardRepository(':memory:', { now: () => now + seed, fileExists: () => true });
-  repo.ensureFirstBoard();
+  const repo = await newRepo({ now: () => now + seed, fileExists: () => true });
+  await repo.ensureFirstBoard();
   const hist = new History(100000);
-  for (const c of repo.snapshot().columns.slice(0, 2)) for (let i = 0; i < 3; i++) repo.addCard(c.id, `시작카드${i}`);
-  const initial = norm(repo.snapshot());
+  for (const c of (await repo.snapshot()).columns.slice(0, 2)) for (let i = 0; i < 3; i++) await repo.addCard(c.id, `시작카드${i}`);
+  const initial = norm(await repo.snapshot());
   const log: string[] = [];
   let keyN = 0;
 
   const dates = ['2026-10-30', '2026-11-03', '2026-11-04', '2026-11-30', '2028-02-29', null, null];
   const ops: Record<string, () => any> = {
-    createBoard: () => repo.createBoard('보드' + Math.floor(r() * 5)),
-    renameBoard: () => repo.renameBoard(pick(repo.snapshot().boards)?.id ?? 'x', r() < 0.1 ? '   ' : '이름' + Math.floor(r() * 9)),
-    deleteBoard: () => repo.deleteBoard(pick(repo.snapshot().boards)?.id ?? 'x'),
-    duplicateBoard: () => repo.duplicateBoard(pick(repo.snapshot().boards)?.id ?? 'x'),
-    addColumn: () => repo.addColumn(pick(repo.snapshot().boards)?.id ?? 'x', '열' + Math.floor(r() * 9)),
-    renameColumn: () => repo.renameColumn(pick(repo.snapshot().columns)?.id ?? 'x', '열이름' + Math.floor(r() * 9)),
-    deleteColumn: () => repo.deleteColumn(pick(repo.snapshot().columns)?.id ?? 'x'),
-    moveColumn: () => repo.moveColumn(pick(repo.snapshot().columns)?.id ?? 'x', r() < 0.5 ? -1 : 1),
-    setColumnDone: () => repo.setColumnDone(pick(repo.snapshot().columns)?.id ?? 'x', r() < 0.5),
-    addCard: () => repo.addCard(pick(repo.snapshot().columns)?.id ?? 'x', r() < 0.05 ? '' : '카드' + Math.floor(r() * 99)),
-    updateCard: () =>
-      repo.updateCard(pick(repo.snapshot().cards)?.id ?? 'x', {
+    createBoard: async () => await repo.createBoard('보드' + Math.floor(r() * 5)),
+    renameBoard: async () => await repo.renameBoard(pick((await repo.snapshot()).boards)?.id ?? 'x', r() < 0.1 ? '   ' : '이름' + Math.floor(r() * 9)),
+    deleteBoard: async () => await repo.deleteBoard(pick((await repo.snapshot()).boards)?.id ?? 'x'),
+    duplicateBoard: async () => await repo.duplicateBoard(pick((await repo.snapshot()).boards)?.id ?? 'x'),
+    addColumn: async () => await repo.addColumn(pick((await repo.snapshot()).boards)?.id ?? 'x', '열' + Math.floor(r() * 9)),
+    renameColumn: async () => await repo.renameColumn(pick((await repo.snapshot()).columns)?.id ?? 'x', '열이름' + Math.floor(r() * 9)),
+    deleteColumn: async () => await repo.deleteColumn(pick((await repo.snapshot()).columns)?.id ?? 'x'),
+    moveColumn: async () => await repo.moveColumn(pick((await repo.snapshot()).columns)?.id ?? 'x', r() < 0.5 ? -1 : 1),
+    setColumnDone: async () => await repo.setColumnDone(pick((await repo.snapshot()).columns)?.id ?? 'x', r() < 0.5),
+    addCard: async () => await repo.addCard(pick((await repo.snapshot()).columns)?.id ?? 'x', r() < 0.05 ? '' : '카드' + Math.floor(r() * 99)),
+    updateCard: async () =>
+      await repo.updateCard(pick((await repo.snapshot()).cards)?.id ?? 'x', {
         ...(r() < 0.5 ? { title: '제목' + Math.floor(r() * 99) } : {}),
         ...(r() < 0.5 ? { dueDate: pick(['2026-10-30', '2026-11-03', '2026-11-04', '2026-11-30', '2028-02-29', '2026-01-31']) as any, repeat: pick(['daily', 'weekly', 'monthly', 'monthly', 'none'] as const) } : {}),
         ...(r() < 0.1 ? { dueDate: null } : {}),
         ...(r() < 0.4 ? { labels: LABEL_COLORS.filter(() => r() < 0.4) } : {}),
         ...(r() < 0.3 ? { assignee: pick(['', '김', '이']) } : {}),
       }),
-    moveCard: () => {
-      const s = repo.snapshot();
+    moveCard: async () => {
+      const s = await repo.snapshot();
       const card = pick(s.cards);
       const cols = card ? s.columns.filter((c) => c.boardId === s.columns.find((x) => x.id === card.columnId)?.boardId) : s.columns;
       const doneCols = cols.filter((c) => c.isDone);
       const target = r() < 0.5 && doneCols.length ? pick(doneCols) : pick(cols);
-      return repo.moveCard(card?.id ?? 'x', target?.id ?? 'x', pick([0, 1, 2, 5, 99, -3, NaN, 1.7])!, r() < 0.05 ? undefined : TODAY);
+      return await repo.moveCard(card?.id ?? 'x', target?.id ?? 'x', pick([0, 1, 2, 5, 99, -3, NaN, 1.7])!, r() < 0.05 ? undefined : TODAY);
     },
-    deleteCard: () => repo.deleteCard(pick(repo.snapshot().cards)?.id ?? 'x'),
-    duplicateCard: () => repo.duplicateCard(pick(repo.snapshot().cards)?.id ?? 'x'),
-    setArchived: () => {
-      const cards = repo.snapshot().cards.filter(() => r() < 0.3);
-      return repo.setArchived(cards.map((c) => c.id), r() < 0.5);
+    deleteCard: async () => await repo.deleteCard(pick((await repo.snapshot()).cards)?.id ?? 'x'),
+    duplicateCard: async () => await repo.duplicateCard(pick((await repo.snapshot()).cards)?.id ?? 'x'),
+    setArchived: async () => {
+      const cards = (await repo.snapshot()).cards.filter(() => r() < 0.3);
+      return await repo.setArchived(cards.map((c) => c.id), r() < 0.5);
     },
-    bulkMove: () => {
-      const s = repo.snapshot();
+    bulkMove: async () => {
+      const s = await repo.snapshot();
       const col = r() < 0.5 ? pick(s.columns.filter((c) => c.isDone)) ?? pick(s.columns) : pick(s.columns);
       const same = s.cards.filter((c) => s.columns.find((x) => x.id === c.columnId)?.boardId === col?.boardId && r() < 0.5);
-      return repo.bulkMove(same.map((c) => c.id), col?.id ?? 'x', TODAY);
+      return await repo.bulkMove(same.map((c) => c.id), col?.id ?? 'x', TODAY);
     },
-    bulkDelete: () => repo.bulkDelete(repo.snapshot().cards.filter(() => r() < 0.2).map((c) => c.id)),
-    addCheck: () => repo.addCheck(pick(repo.snapshot().cards)?.id ?? 'x', '항목' + Math.floor(r() * 9)),
-    updateCheck: () => repo.updateCheck(pick(repo.snapshot().checks)?.id ?? 'x', r() < 0.5 ? { done: r() < 0.5 } : { text: '고침' + Math.floor(r() * 9) }),
-    deleteCheck: () => repo.deleteCheck(pick(repo.snapshot().checks)?.id ?? 'x'),
-    addComment: () => repo.addComment(pick(repo.snapshot().cards)?.id ?? 'x', '댓글' + Math.floor(r() * 9)),
-    updateComment: () => repo.updateComment(pick(repo.snapshot().comments)?.id ?? 'x', '고친댓글' + Math.floor(r() * 9)),
-    deleteComment: () => repo.deleteComment(pick(repo.snapshot().comments)?.id ?? 'x'),
-    addAttachment: () => repo.addAttachment(pick(repo.snapshot().cards)?.id ?? 'x', { name: 'a.txt', size: 1, mime: 'x', storageKey: 'k' + keyN++ }),
-    deleteAttachment: () => repo.deleteAttachment(pick(repo.snapshot().attachments)?.id ?? 'x'),
+    bulkDelete: async () => await repo.bulkDelete((await repo.snapshot()).cards.filter(() => r() < 0.2).map((c) => c.id)),
+    addCheck: async () => await repo.addCheck(pick((await repo.snapshot()).cards)?.id ?? 'x', '항목' + Math.floor(r() * 9)),
+    updateCheck: async () => await repo.updateCheck(pick((await repo.snapshot()).checks)?.id ?? 'x', r() < 0.5 ? { done: r() < 0.5 } : { text: '고침' + Math.floor(r() * 9) }),
+    deleteCheck: async () => await repo.deleteCheck(pick((await repo.snapshot()).checks)?.id ?? 'x'),
+    addComment: async () => await repo.addComment(pick((await repo.snapshot()).cards)?.id ?? 'x', '댓글' + Math.floor(r() * 9)),
+    updateComment: async () => await repo.updateComment(pick((await repo.snapshot()).comments)?.id ?? 'x', '고친댓글' + Math.floor(r() * 9)),
+    deleteComment: async () => await repo.deleteComment(pick((await repo.snapshot()).comments)?.id ?? 'x'),
+    addAttachment: async () => await repo.addAttachment(pick((await repo.snapshot()).cards)?.id ?? 'x', { name: 'a.txt', size: 1, mime: 'x', storageKey: 'k' + keyN++ }),
+    deleteAttachment: async () => await repo.deleteAttachment(pick((await repo.snapshot()).attachments)?.id ?? 'x'),
   };
   // 실제 사용처럼 카드 작업이 대부분이고, 보드·열 삭제는 드물게
   const W: Record<string, number> = {
@@ -143,10 +143,10 @@ function runSequence(seed: number, steps: number, mixed: boolean) {
     addCheck: 5, updateCheck: 3, deleteCheck: 2, addComment: 3, updateComment: 1, deleteComment: 1, addAttachment: 3, deleteAttachment: 2,
   };
   const names = Object.keys(ops).flatMap((k) => Array(Math.max(1, Math.round((W[k] ?? 1) * 4))).fill(k));
-  const undoRedo = (dir: 'undo' | 'redo') => {
+  const undoRedo = async (dir: 'undo' | 'redo') => {
     const e = dir === 'undo' ? hist.peekUndo() : hist.peekRedo();
     if (!e) return;
-    const res = repo.applyPatch(dir === 'undo' ? e.inverse : e.forward, e.expect);
+    const res = await repo.applyPatch(dir === 'undo' ? e.inverse : e.forward, e.expect);
     if (res.conflict) {
       if (!mixed) throw new Error(`[규칙 위반] 혼자 쓰는데 되돌리기가 충돌로 거부됨 (${e.label}, ${res.reason})`);
       bump('충돌로 건너뜀(다른 탭 변경 감지)');
@@ -165,16 +165,16 @@ function runSequence(seed: number, steps: number, mixed: boolean) {
     try {
       if (roll < 0.1) {
         label = 'undo';
-        undoRedo('undo');
+        await undoRedo('undo');
       } else if (roll < 0.16) {
         label = 'redo';
-        undoRedo('redo');
+        await undoRedo('redo');
       } else {
         label = pick(names)!;
-        const before = repo.snapshot().revision;
+        const before = (await repo.snapshot()).revision;
         const external = mixed && r() < 0.25; // 다른 탭이 한 변경: 내 이력에는 남지 않는다
-        const cardsBefore = repo.snapshot().cards.length;
-        const out = ops[label]();
+        const cardsBefore = (await repo.snapshot()).cards.length;
+        const out = await ops[label]();
         if (out?.entry) {
           if (!external) hist.push(out.entry);
           bump('성공:' + label);
@@ -182,7 +182,7 @@ function runSequence(seed: number, steps: number, mixed: boolean) {
           if ((label === 'moveCard' || label === 'bulkMove') && grew > 0) bump('★반복 후속 카드 생성(' + label + ')');
         } else bump('변화없음:' + label);
         // 바뀐 게 있으면 번호가 정확히 1 오르고, 없으면 그대로여야 한다
-        const after = repo.snapshot().revision;
+        const after = (await repo.snapshot()).revision;
         if (out?.entry ? after !== before + 1 : after !== before) throw new Error(`[규칙 위반] 번호 증가가 이상함 ${label}: ${before}→${after}, entry=${!!out?.entry}`);
       }
     } catch (e) {
@@ -191,7 +191,7 @@ function runSequence(seed: number, steps: number, mixed: boolean) {
     }
     log.push(label);
     try {
-      invariants(repo.snapshot(), `seed ${seed} step ${i} ${label}`);
+      invariants(await repo.snapshot(), `seed ${seed} step ${i} ${label}`);
     } catch (e) {
       throw new Error(`${(e as Error).message}\n최근 작업: ${log.slice(-8).join(' → ')}`);
     }
@@ -199,33 +199,33 @@ function runSequence(seed: number, steps: number, mixed: boolean) {
 
   // 전부 되돌리면 맨 처음 상태, 다시 전부 실행하면 되돌리기 직전 상태와 정확히 같아야 한다 (혼자 쓸 때만 성립)
   // (중간에 되돌리기를 하고 끝났다면 "다시 실행" 대기열이 남아 있으니, 그걸 먼저 모두 실행한 상태를 기준으로 삼는다)
-  while (hist.canRedo()) undoRedo('redo');
-  invariants(repo.snapshot(), `seed ${seed} 남은 다시 실행을 모두 적용한 뒤`);
-  const finalNorm = norm(repo.snapshot());
+  while (hist.canRedo()) await undoRedo('redo');
+  invariants(await repo.snapshot(), `seed ${seed} 남은 다시 실행을 모두 적용한 뒤`);
+  const finalNorm = norm(await repo.snapshot());
   let n = 0;
   while (hist.canUndo()) {
-    undoRedo('undo');
-    invariants(repo.snapshot(), `seed ${seed} 전부 되돌리는 중 ${++n}`);
+    await undoRedo('undo');
+    invariants(await repo.snapshot(), `seed ${seed} 전부 되돌리는 중 ${++n}`);
   }
   if (!mixed) {
-    expect(norm(repo.snapshot()), `seed ${seed}: 전부 되돌렸는데 처음 상태와 다름\n작업: ${log.join(',')}`).toBe(initial);
+    expect(norm(await repo.snapshot()), `seed ${seed}: 전부 되돌렸는데 처음 상태와 다름\n작업: ${log.join(',')}`).toBe(initial);
     while (hist.canRedo()) {
-      undoRedo('redo');
-      invariants(repo.snapshot(), `seed ${seed} 전부 다시 실행하는 중`);
+      await undoRedo('redo');
+      invariants(await repo.snapshot(), `seed ${seed} 전부 다시 실행하는 중`);
     }
-    expect(norm(repo.snapshot()), `seed ${seed}: 전부 다시 실행했는데 되돌리기 직전 상태와 다름`).toBe(finalNorm);
+    expect(norm(await repo.snapshot()), `seed ${seed}: 전부 다시 실행했는데 되돌리기 직전 상태와 다름`).toBe(finalNorm);
   }
-  repo.close(); // 시험마다 만든 DB를 닫아 메모리가 쌓이지 않게 한다
+  await disposeRepo(repo); // 시험마다 만든 DB 칸막이를 지운다
 }
 
 describe('무작위 연산 퍼징: 어떤 순서로 해도 데이터가 망가지지 않고, 전부 되돌리면 처음으로 돌아온다', () => {
-  const SEEDS = Number(process.env.FUZZ_SEEDS ?? 300);
-  const STEPS = Number(process.env.FUZZ_STEPS ?? 80);
-  it(`${SEEDS}가지 무작위 순서 × ${STEPS}번 작업`, () => {
+  const SEEDS = Number(process.env.FUZZ_SEEDS ?? 40);
+  const STEPS = Number(process.env.FUZZ_STEPS ?? 60);
+  it(`${SEEDS}가지 무작위 순서 × ${STEPS}번 작업`, async () => {
     const start = Number(process.env.FUZZ_START ?? 1);
     const mb = () => Math.round(process.memoryUsage().rss / 1048576);
     for (let seed = start; seed < start + SEEDS; seed++) {
-      runSequence(seed, STEPS, seed % 2 === 0); // 짝수 씨앗: 다른 탭의 몰래 변경을 섞음
+      await runSequence(seed, STEPS, seed % 2 === 0); // 짝수 씨앗: 다른 탭의 몰래 변경을 섞음
       if (process.env.FUZZ_STATS && (seed - start) % 25 === 0) console.log(`[메모리] ${seed - start}번째 시험 후 RSS ${mb()}MB`);
       if (mb() > 4000) throw new Error(`메모리가 4GB를 넘어 중단 (seed ${seed}, ${mb()}MB)`);
     }

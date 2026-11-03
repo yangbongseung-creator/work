@@ -21,8 +21,8 @@ export async function POST(req: Request) {
     // 서버에서도 개수·크기를 검사한다 (화면 검사에만 기대지 않는다)
     if (data.length > Math.ceil((LIMITS.fileBytes * 4) / 3) + 8) throw new AppError('INVALID_FILE', '파일은 10MB까지 올릴 수 있어요.');
     const bytes = Buffer.from(data, 'base64');
-    const repo = getRepo();
-    if (repo.attachmentCount(cardId) >= LIMITS.attachmentsPerCard) {
+    const repo = await getRepo();
+    if ((await repo.attachmentCount(cardId)) >= LIMITS.attachmentsPerCard) {
       throw new AppError('LIMIT', `첨부파일은 카드당 ${LIMITS.attachmentsPerCard}개까지 올릴 수 있어요.`);
     }
     const { mime } = validateUpload(name, bytes);
@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     const storageKey = randomUUID(); // 저장 이름은 새 ID, 원래 파일명은 DB에만 둔다
     await storage.put(storageKey, bytes);
     try {
-      return repo.addAttachment(cardId, { name, size: bytes.length, mime, storageKey });
+      return await repo.addAttachment(cardId, { name, size: bytes.length, mime, storageKey });
     } catch (e) {
       await storage.remove(storageKey); // 실패하면 남은 파일을 지운다
       throw e;

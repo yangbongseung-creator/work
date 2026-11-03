@@ -1,13 +1,12 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { SqliteBoardRepository } from './repository';
+import { PgBoardRepository } from './repository';
 import { checkRequest } from './guard';
 import { authenticate } from './auth';
 import { LocalChangeFeed, type ChangeFeed } from './feed';
 import { LocalStorageAdapter, cleanupStorage, type StorageAdapter } from './storage';
 import { AppError } from './types';
 
-type Globals = { repo?: SqliteBoardRepository; storage?: StorageAdapter; feed?: ChangeFeed; signals?: boolean };
+type Globals = { repo?: Promise<PgBoardRepository>; storage?: StorageAdapter; feed?: ChangeFeed; signals?: boolean };
 const g = globalThis as unknown as { __kanban?: Globals };
 const state = (g.__kanban ??= {});
 
@@ -42,21 +41,41 @@ export function getStorage(): StorageAdapter {
   return state.storage;
 }
 
-export function getRepo(): SqliteBoardRepository {
+/** DB 연결은 한 번만 만들고 모두가 나눠 쓴다. 처음 부를 때 표를 만들고 시작 정리를 한다. */
+export function getRepo(): Promise<PgBoardRepository> {
   if (!state.repo) {
-    const file = process.env.KANBAN_DB ?? path.join(process.cwd(), 'data', 'kanban.db');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const storage = getStorage();
-    const feed = getFeed();
-    const repo = new SqliteBoardRepository(file, {
-      fileExists: (k) => storage.exists(k),
-      onCommit: (rev) => feed.publish(rev),
+    const promise = (async () => {
+      const connectionString = process.env.DATABASE_URL;
+      if (!connectionString) {
+        throw new AppError('CONFIG', 'DB 연결 설정이 없어요. .env 파일에 DATABASE_URL을 적어 주세요. (README 참고)', 500);
+      }
+      const storage = getStorage();
+      const feed = getFeed();
+      let repo: PgBoardRepository;
+      try {
+        repo = await PgBoardRepository.create({
+          connectionString,
+          schema: process.env.DATABASE_SCHEMA || undefined,
+          fileExists: (k) => storage.exists(k),
+          onCommit: (rev) => feed.publish(rev),
+        });
+      } catch (e) {
+        // 자세한 원인은 서버 로그에만 남기고(주소·비밀번호는 찍지 않는다), 화면에는 알아보기 쉬운 안내만 보낸다
+        const err = e as { code?: string; message?: string };
+        console.error(`DB 연결 실패 (${err.code ?? 'unknown'}): ${err.message ?? e}`);
+        throw new AppError('DB_CONNECT', 'DB에 연결하지 못했어요. .env의 DATABASE_URL(주소·사용자·비밀번호)과 PostgreSQL이 켜져 있는지 확인해 주세요.', 503);
+      }
+      await repo.ensureFirstBoard();
+      await repo.purgeOrphanDismissals();
+      // 앱 시작 시 정리: 보관 기간이 지난 첨부, 어디에서도 쓰지 않는 고아 파일
+      cleanupStorage(repo, storage).catch((e) => console.error('첨부 정리 실패', e));
+      return repo;
+    })();
+    // 연결에 실패하면 다음 요청에서 다시 시도할 수 있게 비워 둔다
+    promise.catch(() => {
+      if (state.repo === promise) state.repo = undefined;
     });
-    repo.ensureFirstBoard();
-    repo.purgeOrphanDismissals();
-    state.repo = repo;
-    // 앱 시작 시 정리: 보관 기간이 지난 첨부, 어디에서도 쓰지 않는 고아 파일
-    cleanupStorage(repo, storage).catch((e) => console.error('첨부 정리 실패', e));
+    state.repo = promise;
   }
   return state.repo;
 }

@@ -11,7 +11,7 @@ export async function POST(req: Request) {
     } catch {
       throw new AppError('INVALID', '요청 형식이 올바르지 않아요.');
     }
-    const repo = getRepo();
+    const repo = await getRepo();
     const s = (v: unknown) => (typeof v === 'string' ? v : '');
     const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
     const today = typeof body?.today === 'string' ? body.today : undefined;

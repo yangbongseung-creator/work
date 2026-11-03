@@ -1,22 +1,23 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { SqliteBoardRepository } from '../lib/repository';
+import type { PgBoardRepository } from '../lib/repository';
+import { newRepo } from './helpers';
 import { History } from '../lib/history';
 import type { Entry } from '../lib/types';
 
-let repo: SqliteBoardRepository;
+let repo: PgBoardRepository;
 let history: History;
-beforeEach(() => {
-  repo = new SqliteBoardRepository(':memory:');
+beforeEach(async () => {
+  repo = await newRepo();
   history = new History(50);
-  repo.ensureFirstBoard();
+  await repo.ensureFirstBoard();
 });
 
 function record(entry: Entry | null) {
   if (entry) history.push(entry);
 }
-function undo() {
+async function undo() {
   const e = history.peekUndo()!;
-  const r = repo.applyPatch(e.inverse, e.expect);
+  const r = await repo.applyPatch(e.inverse, e.expect);
   if (r.conflict) {
     history.dropUndo();
     return 'conflict';
@@ -24,9 +25,9 @@ function undo() {
   history.commitUndo(r.touched);
   return 'ok';
 }
-function redo() {
+async function redo() {
   const e = history.peekRedo()!;
-  const r = repo.applyPatch(e.forward, e.expect);
+  const r = await repo.applyPatch(e.forward, e.expect);
   if (r.conflict) {
     history.dropRedo();
     return 'conflict';
@@ -36,57 +37,57 @@ function redo() {
 }
 
 describe('되돌리기 이력', () => {
-  it('같은 카드를 여러 번 수정한 뒤 연속으로 되돌려도 충돌로 오인하지 않는다', () => {
-    const col = repo.snapshot().columns[0];
-    record(repo.addCard(col.id, 'v0').entry);
-    const id = repo.snapshot().cards[0].id;
-    record(repo.updateCard(id, { title: 'v1' }).entry);
-    record(repo.updateCard(id, { title: 'v2' }).entry);
-    record(repo.updateCard(id, { title: 'v3' }).entry);
+  it('같은 카드를 여러 번 수정한 뒤 연속으로 되돌려도 충돌로 오인하지 않는다', async () => {
+    const col = (await repo.snapshot()).columns[0];
+    record((await repo.addCard(col.id, 'v0')).entry);
+    const id = (await repo.snapshot()).cards[0].id;
+    record((await repo.updateCard(id, { title: 'v1' })).entry);
+    record((await repo.updateCard(id, { title: 'v2' })).entry);
+    record((await repo.updateCard(id, { title: 'v3' })).entry);
 
-    expect(undo()).toBe('ok');
-    expect(repo.snapshot().cards[0].title).toBe('v2');
-    expect(undo()).toBe('ok');
-    expect(repo.snapshot().cards[0].title).toBe('v1');
-    expect(undo()).toBe('ok');
-    expect(repo.snapshot().cards[0].title).toBe('v0');
-    expect(undo()).toBe('ok'); // 카드 생성 취소
-    expect(repo.snapshot().cards).toHaveLength(0);
+    expect(await undo()).toBe('ok');
+    expect((await repo.snapshot()).cards[0].title).toBe('v2');
+    expect(await undo()).toBe('ok');
+    expect((await repo.snapshot()).cards[0].title).toBe('v1');
+    expect(await undo()).toBe('ok');
+    expect((await repo.snapshot()).cards[0].title).toBe('v0');
+    expect(await undo()).toBe('ok'); // 카드 생성 취소
+    expect((await repo.snapshot()).cards).toHaveLength(0);
 
     // 다시 실행도 끝까지 이어진다
-    expect(redo()).toBe('ok');
-    expect(redo()).toBe('ok');
-    expect(redo()).toBe('ok');
-    expect(redo()).toBe('ok');
-    expect(repo.snapshot().cards[0].title).toBe('v3');
-    expect(repo.snapshot().cards[0].id).toBe(id);
+    expect(await redo()).toBe('ok');
+    expect(await redo()).toBe('ok');
+    expect(await redo()).toBe('ok');
+    expect(await redo()).toBe('ok');
+    expect((await repo.snapshot()).cards[0].title).toBe('v3');
+    expect((await repo.snapshot()).cards[0].id).toBe(id);
   });
 
-  it('다른 탭이 바꾼 항목은 건너뛰고 덮어쓰지 않는다', () => {
-    const col = repo.snapshot().columns[0];
-    record(repo.addCard(col.id, 'v0').entry);
-    const id = repo.snapshot().cards[0].id;
-    record(repo.updateCard(id, { title: 'mine' }).entry);
-    repo.updateCard(id, { title: 'other-tab' }); // 이력에 안 남는 외부 변경
-    expect(undo()).toBe('conflict');
-    expect(repo.snapshot().cards[0].title).toBe('other-tab');
+  it('다른 탭이 바꾼 항목은 건너뛰고 덮어쓰지 않는다', async () => {
+    const col = (await repo.snapshot()).columns[0];
+    record((await repo.addCard(col.id, 'v0')).entry);
+    const id = (await repo.snapshot()).cards[0].id;
+    record((await repo.updateCard(id, { title: 'mine' })).entry);
+    await repo.updateCard(id, { title: 'other-tab' }); // 이력에 안 남는 외부 변경
+    expect(await undo()).toBe('conflict');
+    expect((await repo.snapshot()).cards[0].title).toBe('other-tab');
   });
 
-  it('새 작업을 하면 다시 실행 이력이 지워진다', () => {
-    const col = repo.snapshot().columns[0];
-    record(repo.addCard(col.id, 'a').entry);
-    undo();
+  it('새 작업을 하면 다시 실행 이력이 지워진다', async () => {
+    const col = (await repo.snapshot()).columns[0];
+    record((await repo.addCard(col.id, 'a')).entry);
+    await undo();
     expect(history.canRedo()).toBe(true);
-    record(repo.addCard(col.id, 'b').entry);
+    record((await repo.addCard(col.id, 'b')).entry);
     expect(history.canRedo()).toBe(false);
   });
 
-  it('최대 50단계까지만 기억한다', () => {
-    const col = repo.snapshot().columns[0];
-    for (let i = 0; i < 60; i++) record(repo.addCard(col.id, `c${i}`).entry);
+  it('최대 50단계까지만 기억한다', async () => {
+    const col = (await repo.snapshot()).columns[0];
+    for (let i = 0; i < 60; i++) record((await repo.addCard(col.id, `c${i}`)).entry);
     let n = 0;
     while (history.canUndo()) {
-      undo();
+      await undo();
       n++;
     }
     expect(n).toBe(50);

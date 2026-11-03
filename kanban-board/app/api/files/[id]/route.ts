@@ -9,7 +9,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   if (blocked) return blocked;
   try {
     const { id } = await ctx.params;
-    const att = getRepo().getAttachment(id);
+    const att = await (await getRepo()).getAttachment(id);
     if (!att) return Response.json({ error: '파일을 찾을 수 없어요.' }, { status: 404 });
     const storage = getStorage();
     if (!storage.exists(att.storageKey)) return Response.json({ error: '파일이 정리되어 없어요.' }, { status: 410 });
