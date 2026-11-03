@@ -30,7 +30,7 @@ psql --version
 |---|---|---|
 | 우분투 | 24.04 (설치 안내서를 `kanban` 사용자로 글자 그대로 따라 해 봄) | **26.04** (이 안내서가 만들어질 때 확인할 수 없었어요) |
 | PostgreSQL | **16**, **18.6** (자동 테스트와 브라우저 시험 모두 통과) | 14 |
-| Node.js | 22 | 20, 24 |
+| Node.js | **22** | 20, 24 (설치된 부품의 요구 버전상 22 이상이 안전합니다) |
 
 우분투 26.04에서는 2단계의 `apt` 패키지 이름이나 Node.js 설치 방법이 다를 수 있어요. 막히면 오류 메시지를 알려 주세요.
 
@@ -74,7 +74,8 @@ psql --version
 `node -v`가 `v22.`로 시작하면 성공입니다. (NodeSource 안내가 바뀌었다면 https://github.com/nodesource/distributions 를 확인하세요.)
 
 > **NodeSource가 내 우분투 버전을 지원하지 않아 실패하면** 두 가지 방법이 있어요.
-> 1. `apt-cache policy nodejs`로 우분투 기본 저장소의 Node 버전을 확인하고, **20 이상**이면 `sudo apt install -y nodejs npm`으로 설치합니다. (제가 시험한 건 22뿐이라, 22가 아니면 7단계 `npm run build`가 끝까지 되는지 꼭 확인하세요.)
+> 1. `apt-cache policy nodejs`로 우분투 기본 저장소의 Node 버전을 확인하고, **22 이상**이면 `sudo apt install -y nodejs npm`으로 설치합니다.
+>    (Node **20**은 권장하지 않습니다. 앱 본체는 20에서도 돌아가도록 만들어져 있지만, 설치되는 시험 도구가 22 이상을 요구해서 `npm ci`가 경고를 냅니다. 제가 직접 확인해 보지는 못했습니다.)
 > 2. `nvm`(Node 버전 관리 도구)으로 `nvm install 22`를 합니다. 설치 명령은 https://github.com/nvm-sh/nvm 의 최신 안내를 따르세요. 이때는 `kanban` 사용자로 설치해야 합니다.
 
 ## 3단계. 전용 사용자와 폴더 만들기
