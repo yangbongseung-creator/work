@@ -21,9 +21,18 @@
 
 ```bash
 lsb_release -a
+psql --version
 ```
 
-`Ubuntu 22.04` 또는 `24.04`면 아래를 그대로 따라 하면 됩니다. 다른 버전이면 알려 주세요.
+**제가 직접 시험해 본 환경**
+
+| 항목 | 시험한 것 | 시험하지 못한 것 |
+|---|---|---|
+| 우분투 | 24.04 (설치 안내서를 `kanban` 사용자로 글자 그대로 따라 해 봄) | **26.04** (이 안내서가 만들어질 때 확인할 수 없었어요) |
+| PostgreSQL | **16**, **18.6** (자동 테스트와 브라우저 시험 모두 통과) | 14 |
+| Node.js | 22 | 20, 24 |
+
+우분투 26.04에서는 2단계의 `apt` 패키지 이름이나 Node.js 설치 방법이 다를 수 있어요. 막히면 오류 메시지를 알려 주세요.
 
 ## 2단계. 필요한 프로그램 설치
 
@@ -43,7 +52,10 @@ sudo apt install -y git curl ca-certificates build-essential tmux postgresql
 | `tmux` | SSH를 끊어도 앱이 계속 돌게 하는 도구 |
 | `postgresql` | 데이터베이스 (우분투 22.04는 14, 24.04는 16 버전) |
 
-**Node.js 22 설치** (우분투 기본 저장소의 Node는 버전이 낮아서 별도로 설치합니다)
+> **PostgreSQL이 이미 설치되어 있다면**(`psql --version`이 나온다면) 위 명령에서 `postgresql`은 빼도 됩니다.
+> 켜져 있는지는 `sudo systemctl status postgresql`로 확인하세요(`active`면 정상).
+
+**Node.js 22 설치** (우분투 기본 저장소의 Node는 버전이 낮을 수 있어 별도로 설치합니다)
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -60,6 +72,10 @@ psql --version
 ```
 
 `node -v`가 `v22.`로 시작하면 성공입니다. (NodeSource 안내가 바뀌었다면 https://github.com/nodesource/distributions 를 확인하세요.)
+
+> **NodeSource가 내 우분투 버전을 지원하지 않아 실패하면** 두 가지 방법이 있어요.
+> 1. `apt-cache policy nodejs`로 우분투 기본 저장소의 Node 버전을 확인하고, **20 이상**이면 `sudo apt install -y nodejs npm`으로 설치합니다. (제가 시험한 건 22뿐이라, 22가 아니면 7단계 `npm run build`가 끝까지 되는지 꼭 확인하세요.)
+> 2. `nvm`(Node 버전 관리 도구)으로 `nvm install 22`를 합니다. 설치 명령은 https://github.com/nvm-sh/nvm 의 최신 안내를 따르세요. 이때는 `kanban` 사용자로 설치해야 합니다.
 
 ## 3단계. 전용 사용자와 폴더 만들기
 
@@ -110,7 +126,7 @@ git clone --branch claude/kanban-board-stage1-2 https://github.com/yangbongseung
 cd work/kanban-board
 ```
 
-> 저장소가 **비공개**라면 위 `git clone`이 비밀번호를 물으며 실패합니다. 그때는 알려 주세요. 서버에서만 쓰는 읽기 전용 키를 만드는 방법을 안내해 드릴게요.
+> 저장소는 공개라서 비밀번호 없이 받아집니다.
 
 ## 6단계. 설정 파일 만들기
 
