@@ -90,7 +90,8 @@ main() {
 
   echo "1/2 데이터베이스를 복원하는 중…"
   # 한 번에 처리: 중간에 오류가 나면 아무것도 바뀌지 않는다
-  if ! psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f "$DBF" >/dev/null; then
+  # (빈 데이터베이스에 복원할 때 나오는 "없어서 건너뜀" 같은 안내 문구는 숨기고, 경고와 오류만 보여 준다)
+  if ! PGOPTIONS='-c client_min_messages=warning' psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f "$DBF" >/dev/null; then
     echo "중단: 데이터베이스 복원에 실패했어요. 데이터베이스는 바뀌지 않았어요. 위의 오류 메시지를 확인해 주세요."
     exit 1
   fi

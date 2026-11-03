@@ -134,6 +134,7 @@ sudo -u postgres psql -c "SHOW listen_addresses;"
 ```
 
 `localhost`가 나오면 바깥에서는 데이터베이스에 닿을 수 없는 안전한 상태입니다. (`*`이면 누군가 바꿔 둔 것이니 서버 관리자에게 확인하세요.)
+`could not change directory to "/home/…": Permission denied`라는 경고가 함께 나와도 무시해도 됩니다 (4단계의 `sudo -u postgres psql`도 마찬가지).
 
 **스왑 만들기** (1단계에서 RAM이 2GB 미만이었을 때만):
 
