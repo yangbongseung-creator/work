@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DUE_GROUP_TITLES, groupByDue } from '../lib/filter';
 import { NOTICE_TEXT, type Notice } from '../lib/notices';
 import type { Board, Card, Column } from '../lib/types';
 import { CardFace, noMeta, type CardMeta } from './Board';
+import { isBackdropPress, useFocusTrap } from './ui';
 import { isOverdue } from './util';
 
 /** 마감일순 보기: 지남 · 오늘 · 예정 · 마감일 없음 */
@@ -99,8 +100,10 @@ export function ArchiveModal(props: {
   onClose: () => void;
 }) {
   const [q, setQ] = useState('');
+  const dialog = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialog);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && props.onClose();
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !e.isComposing && props.onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
@@ -108,13 +111,8 @@ export function ArchiveModal(props: {
   const query = q.trim().toLowerCase();
   const list = props.cards.filter((c) => !query || c.title.toLowerCase().includes(query) || c.description.toLowerCase().includes(query));
   return (
-    <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="보관함"
-      >
+    <div className="backdrop" onMouseDown={(e) => isBackdropPress(e) && props.onClose()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label="보관함" ref={dialog}>
         <div className="modal-head">
           <h3 style={{ margin: 0 }}>보관함 <span className="muted">{props.cards.length}</span></h3>
           <div className="spacer" />

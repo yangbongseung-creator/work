@@ -33,11 +33,13 @@ export function getFeed(): ChangeFeed {
   return state.feed;
 }
 
+/** 첨부 저장 폴더. 값이 비어 있으면(KANBAN_UPLOADS=) 적지 않은 것으로 보고 앱 폴더 아래 data/uploads를 쓴다. */
+export function uploadsDir(): string {
+  return process.env.KANBAN_UPLOADS?.trim() || path.join(process.cwd(), 'data', 'uploads');
+}
+
 export function getStorage(): StorageAdapter {
-  if (!state.storage) {
-    const dir = process.env.KANBAN_UPLOADS ?? path.join(process.cwd(), 'data', 'uploads');
-    state.storage = new LocalStorageAdapter(dir);
-  }
+  if (!state.storage) state.storage = new LocalStorageAdapter(uploadsDir());
   return state.storage;
 }
 
@@ -59,7 +61,7 @@ export function getRepo(): Promise<PgBoardRepository> {
     const promise = (async () => {
       const connectionString = process.env.DATABASE_URL;
       if (!connectionString) {
-        throw new AppError('CONFIG', 'DB 연결 설정이 없어요. .env 파일에 DATABASE_URL을 적어 주세요. (README 참고)', 500);
+        throw new AppError('CONFIG', 'DB 연결 설정이 없어요. 앱 폴더의 .env 파일에 DATABASE_URL을 적고 앱을 다시 켜 주세요. (설치 안내서 6단계)', 500);
       }
       const storage = getStorage();
       const feed = getFeed();

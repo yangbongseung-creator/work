@@ -39,6 +39,12 @@ describe('반복 마감 날짜 계산', () => {
     expect(isYmd('2028-02-29')).toBe(true);
     expect(isYmd('내일')).toBe(false);
   });
+  it('0~99년도 실제 달력대로 판단한다 (1900년대로 바뀌지 않음)', () => {
+    expect(isYmd('0025-11-03')).toBe(true);
+    expect(isYmd('0004-02-29')).toBe(true);
+    expect(isYmd('0003-02-29')).toBe(false);
+    expect(isYmd('0099-12-31')).toBe(true);
+  });
 });
 
 describe('검색·필터', () => {

@@ -2,7 +2,8 @@
 export function isYmd(s: unknown): s is string {
   if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [y, m, d] = s.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d); // Date.UTC는 0~99년을 1900년대로 바꿔 버려서 쓰지 않는다
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
 

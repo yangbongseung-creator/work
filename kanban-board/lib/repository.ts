@@ -141,6 +141,8 @@ function cleanDate(raw: unknown): string | null {
   if (raw === null || raw === '') return null;
   if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) throw new AppError('INVALID', '날짜는 YYYY-MM-DD 형식이어야 해요.');
   if (!isYmd(raw)) throw new AppError('INVALID', '존재하지 않는 날짜예요.');
+  const year = Number(raw.slice(0, 4));
+  if (year < 1900 || year > 2999) throw new AppError('INVALID', '마감일의 연도를 확인해 주세요. (1900~2999년)');
   return raw;
 }
 const REPEATS: Repeat[] = ['none', 'daily', 'weekly', 'monthly'];

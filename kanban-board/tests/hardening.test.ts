@@ -96,6 +96,19 @@ describe('멈춤 방지: 연결 기다림도 시간 제한이 있다', () => {
   });
 });
 
+describe('마감일 연도 검사', () => {
+  it('1900~2999년 밖의 연도(0025년 같은 오타)는 이유를 알려 주며 거부하고, 경계값은 받는다', async () => {
+    const id = await card();
+    for (const bad of ['0025-11-03', '1899-12-31', '3000-01-01']) {
+      await expect(repo.updateCard(id, { dueDate: bad }), bad).rejects.toThrow('연도를 확인해 주세요');
+    }
+    for (const okDate of ['1900-01-01', '2999-12-31']) {
+      const r = await repo.updateCard(id, { dueDate: okDate });
+      expect(r.snapshot.cards.find((c) => c.id === id)?.dueDate).toBe(okDate);
+    }
+  });
+});
+
 describe('첨부 정리: 이상한 파일이 있어도 중단되지 않는다', () => {
   it('저장 키 모양이 아닌 파일은 건드리지 않고, 오래된 고아 파일은 지운다', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanban-up-'));

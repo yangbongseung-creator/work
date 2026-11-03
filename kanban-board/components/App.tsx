@@ -9,21 +9,23 @@ import {
   closestCorners,
   useSensor,
   useSensors,
+  type Announcements,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
+  type UniqueIdentifier,
 } from '@dnd-kit/core';
 import { arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { History } from '../lib/history';
 import { emptyFilters, groupByDue, hasFilters, matchCard, type Filters } from '../lib/filter';
 import { computeNotices, NOTICE_TEXT, type Notice } from '../lib/notices';
 import { applyChanges } from '../lib/sync';
-import { LABEL_COLORS, LABEL_NAMES, LIMITS, type Card, type Column, type LabelColor, type Patch, type Snapshot } from '../lib/types';
-import { fetchChanges, fetchState, mutate, uploadFile } from './api';
+import { LABEL_COLORS, LABEL_NAMES, LIMITS, type Card, type Column, type Kind, type LabelColor, type Patch, type Snapshot } from '../lib/types';
+import { fetchChanges, fetchState, mutate, uploadFile, type Act, type Body } from './api';
 import { AddColumn, CardFace, ColumnView, noMeta, type CardMeta } from './Board';
 import { CardModal } from './CardModal';
 import { InlineEdit, Menu } from './ui';
-import { isOverdue, isTyping, localToday, store, storeSet } from './util';
+import { isOverdue, isTyping, localToday, placeCard, store, storeSet } from './util';
 import { AllSearchResults, ArchiveModal, Bell, DueView } from './Views';
 
 type Status = 'idle' | 'saving' | 'saved' | 'error';
@@ -34,6 +36,8 @@ const LAST_BOARD_KEY = 'kanban:lastBoard';
 const THEME_KEY = 'kanban:theme';
 const NOTIFY_ON_KEY = 'kanban:browserNotify';
 const NOTIFIED_KEY = 'kanban:notified';
+const DRAG_HELP =
+  '카드를 열려면 Enter, 옮기려면 스페이스를 누르세요. 옮기는 중에는 화살표 키로 움직이고 스페이스나 Enter로 놓아요. Esc를 누르면 취소돼요.';
 
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -60,22 +64,41 @@ export function App() {
   const [browserOn, setBrowserOn] = useState(false);
   const [, bump] = useState(0);
 
+  /** 화면에 보이는 상태 = 서버가 확인해 준 상태(baseRef) + 아직 응답을 기다리는 낙관적 변경들 */
   const snapRef = useRef<Snapshot | null>(null);
-  snapRef.current = snap;
+  const baseRef = useRef<Snapshot | null>(null);
+  const optimistic = useRef(new Map<number, (s: Snapshot) => Snapshot>());
+  const opSeq = useRef(0);
+  /** 이 탭의 변경 요청은 한 줄로 세워 보낸 순서대로 하나씩 처리한다 (응답 순서·되돌리기 이력이 꼬이지 않게) */
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingOps = useRef(0);
+  const lastResult = useRef<Status>('idle');
   const history = useRef(new History(LIMITS.undoSteps));
   const dragOrigin = useRef<{ columnId: string; index: number } | null>(null);
+  const dragItemsRef = useRef<Items | null>(null);
+  dragItemsRef.current = dragItems;
+  const dragMoved = useRef(false); // 끌기 시작 뒤 실제로 움직였는지 (화면 읽기 안내용)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const syncing = useRef(false);
 
-  /** 새 데이터를 받으면 화면 갱신을 기다리지 않고 ref도 바로 맞춘다 (직후 코드가 최신 값을 보게) */
-  const commit = useCallback((s: Snapshot) => {
-    // 늦게 도착한 옛 응답이 이미 반영된 최신 상태(다른 탭의 변경 포함)를 덮어쓰지 않게 한다.
-    // 서버의 번호가 클수록 더 많은 변경을 담고 있으므로, 같거나 더 큰 번호만 받아들인다.
-    const cur = snapRef.current;
-    if (cur && s.revision < cur.revision) return;
-    snapRef.current = s;
+  const render = useCallback(() => {
+    let s = baseRef.current;
+    if (!s) return;
+    for (const f of optimistic.current.values()) s = f(s);
+    snapRef.current = s; // 화면 갱신을 기다리지 않고 ref도 바로 맞춘다 (직후 코드가 최신 값을 보게)
     setSnap(s);
   }, []);
+
+  const commit = useCallback(
+    (s: Snapshot) => {
+      // 늦게 도착한 옛 응답이 이미 반영된 최신 상태(다른 탭의 변경 포함)를 덮어쓰지 않게 한다.
+      // 서버의 번호가 클수록 더 많은 변경을 담고 있으므로, 같거나 더 큰 번호만 받아들인다.
+      const cur = baseRef.current;
+      if (!cur || s.revision >= cur.revision) baseRef.current = s;
+      render();
+    },
+    [render],
+  );
 
   const showToast = useCallback((m: string) => {
     setToast(m);
@@ -90,9 +113,11 @@ export function App() {
       commit(await fetchState());
       setLoadError(null);
     } catch (e) {
-      setLoadError((e as Error).message);
+      // 이미 화면에 데이터가 있으면 화면(열어 둔 카드 포함)을 지우지 않고 안내만 한다
+      if (baseRef.current) showToast((e as Error).message);
+      else setLoadError((e as Error).message);
     }
-  }, [commit]);
+  }, [commit, showToast]);
   useEffect(() => {
     load();
     const t = store(THEME_KEY);
@@ -100,7 +125,13 @@ export function App() {
     setBrowserOn(store(NOTIFY_ON_KEY) === '1' && typeof Notification !== 'undefined' && Notification.permission === 'granted');
   }, [load]);
 
+  const themeReady = useRef(false);
   useEffect(() => {
+    // 처음 한 번은 건너뛴다: 저장된 테마를 읽기 전의 기본값('system')으로 저장값을 덮어쓰지 않게
+    if (!themeReady.current) {
+      themeReady.current = true;
+      return;
+    }
     if (theme === 'system') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', theme);
     storeSet(THEME_KEY, theme);
@@ -135,8 +166,15 @@ export function App() {
       if ((e.target as HTMLElement | null)?.closest?.('.menu')) return;
       setMenu(null);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null); // 알림·담당자 등 열린 작은 창을 Esc로 닫는다
+    };
     document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey);
+    };
   }, []);
 
   // ───────── 여러 탭 동기화 (SSE + 재연결 시 이어받기) ─────────
@@ -152,10 +190,10 @@ export function App() {
     try {
       do {
         catchUpAgain.current = false;
-        const cur = snapRef.current;
+        const cur = baseRef.current;
         if (!cur) break;
         const ch = await fetchChanges(cur.revision);
-        const latest = snapRef.current;
+        const latest = baseRef.current;
         if (latest && ch.full && ch.revision < latest.revision) {
           // 서버가 내 화면보다 옛 상태다(예: DB를 백업으로 되돌림). 낡은 화면을 버리고 새로 불러온다.
           window.location.reload();
@@ -195,7 +233,7 @@ export function App() {
         lastMsg = Date.now();
         const rev = Number((ev as MessageEvent).data);
         // 내가 보낸 변경이 돌아온 것(이미 반영된 번호)은 무시한다
-        if (Number.isFinite(rev) && snapRef.current && rev > snapRef.current.revision) catchUp();
+        if (Number.isFinite(rev) && baseRef.current && rev > baseRef.current.revision) catchUp();
       });
       src.onerror = () => {
         setConn('reconnecting');
@@ -228,98 +266,160 @@ export function App() {
 
   // ───────── 서버에 변경 보내기 ─────────
 
-  const run = useCallback(
-    async (body: Record<string, unknown>, optimistic?: (s: Snapshot) => Snapshot): Promise<boolean> => {
-      const prev = snapRef.current;
+  const enqueue = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const p = queue.current.then(task);
+    queue.current = p.catch(() => undefined);
+    return p;
+  }, []);
+
+  /** 요청 하나가 끝났을 때 상단의 저장 상태를 정한다 (아직 남은 요청이 있으면 '저장 중') */
+  const settle = useCallback((result: Status) => {
+    pendingOps.current = Math.max(0, pendingOps.current - 1);
+    if (result !== 'idle') lastResult.current = result;
+    setStatus(result === 'error' ? 'error' : pendingOps.current > 0 ? 'saving' : lastResult.current);
+    bump((n) => n + 1);
+  }, []);
+
+  const run: Act = useCallback(
+    (body, optimisticFn) => {
+      const id = ++opSeq.current;
+      pendingOps.current++;
       setStatus('saving');
-      if (optimistic && prev) commit(optimistic(prev));
-      try {
-        const res = await mutate({ ...body, today: localToday() }); // 완료한 날짜는 브라우저의 로컬 날짜
-        commit(res.snapshot);
-        if (res.entry) history.current.push(res.entry);
-        setStatus('saved');
-        bump((n) => n + 1);
-        return true;
-      } catch (e) {
-        // 그 사이 다른 탭의 변경이 반영되어 번호가 앞서갔다면, 옛 상태로 되돌리면 최신 내용을 잃으므로 서버에서 다시 받는다
-        if (prev && snapRef.current && snapRef.current.revision === prev.revision) commit(prev);
-        else void load();
-        setStatus('error');
-        showToast((e as Error).message);
-        return false;
+      if (optimisticFn) {
+        optimistic.current.set(id, optimisticFn);
+        render();
       }
+      return enqueue(async () => {
+        try {
+          const base = baseRef.current;
+          const b: Body | null = typeof body === 'function' ? (base ? body(base) : null) : body;
+          if (!b) {
+            // 보낼 것이 없어졌다 (예: 이미 그 상태이거나 카드가 사라짐)
+            optimistic.current.delete(id);
+            render();
+            settle('idle');
+            return true;
+          }
+          const res = await mutate({ ...b, today: localToday() }); // 완료한 날짜는 브라우저의 로컬 날짜
+          optimistic.current.delete(id);
+          commit(res.snapshot);
+          if (res.entry) history.current.push(res.entry);
+          settle('saved');
+          return true;
+        } catch (e) {
+          // 실패한 변경만 화면에서 걷어 낸다 (다른 요청의 변경이나 다른 탭의 변경은 그대로)
+          optimistic.current.delete(id);
+          render();
+          settle('error');
+          showToast((e as Error).message);
+          return false;
+        }
+      });
     },
-    [showToast, commit, load],
+    [enqueue, render, commit, settle, showToast],
   );
 
-  const doUpload = useCallback(async (cardId: string, file: File) => {
-    setStatus('saving');
-    try {
-      const res = await uploadFile(cardId, file);
-      commit(res.snapshot);
-      if (res.entry) history.current.push(res.entry);
-      setStatus('saved');
-      bump((n) => n + 1);
-    } catch (e) {
-      setStatus('error');
-      throw e;
-    }
-  }, [commit]);
+  // 첨부 업로드는 오래 걸릴 수 있어 줄을 세우지 않는다 (그동안 다른 작업이 막히지 않게)
+  const doUpload = useCallback(
+    async (cardId: string, file: File) => {
+      pendingOps.current++;
+      setStatus('saving');
+      try {
+        const res = await uploadFile(cardId, file);
+        commit(res.snapshot);
+        if (res.entry) history.current.push(res.entry);
+        settle('saved');
+      } catch (e) {
+        settle('error');
+        throw e;
+      }
+    },
+    [commit, settle],
+  );
 
-  const boardOfPatch = (p: Patch, s: Snapshot): string | null => {
-    const colBoard = (colId: string) => s.columns.find((c) => c.id === colId)?.boardId ?? null;
+  /** 바뀐 내용이 어느 보드의 것인지: 새로 생기거나 바뀐 것은 실행 뒤 상태에서, 지워진 것은 실행 전 상태에서 찾는다 */
+  const boardOfPatch = (p: Patch, before: Snapshot | null, after: Snapshot): string | null => {
+    const find = (s: Snapshot | null, kind: Kind, id: string): string | null => {
+      if (!s) return null;
+      const colBoard = (colId: string) => s.columns.find((c) => c.id === colId)?.boardId ?? null;
+      const cardBoard = (cardId: string) => {
+        const c = s.cards.find((x) => x.id === cardId);
+        return c ? colBoard(c.columnId) : null;
+      };
+      const byCard = (rows: { id: string; cardId: string }[]) => {
+        const r = rows.find((x) => x.id === id);
+        return r ? cardBoard(r.cardId) : null;
+      };
+      if (kind === 'board') return s.boards.some((b) => b.id === id) ? id : null;
+      if (kind === 'column') return colBoard(id);
+      if (kind === 'card') return cardBoard(id);
+      if (kind === 'check') return byCard(s.checks);
+      if (kind === 'comment') return byCard(s.comments);
+      return byCard(s.attachments);
+    };
     for (const u of p.upsert) {
-      const r = u.row as any;
-      if (u.kind === 'board') return r.id;
-      if (u.kind === 'column') return r.boardId;
-      if (u.kind === 'card') return colBoard(r.columnId);
-      const card = s.cards.find((c) => c.id === r.cardId);
-      if (card) return colBoard(card.columnId);
+      const b = find(after, u.kind, (u.row as { id: string }).id);
+      if (b) return b;
+    }
+    for (const r of p.remove) {
+      const b = find(before, r.kind, r.id);
+      if (b) return b;
     }
     return null;
   };
 
   const step = useCallback(
-    async (dir: 'undo' | 'redo') => {
+    (dir: 'undo' | 'redo'): Promise<void> => {
       const h = history.current;
-      const e = dir === 'undo' ? h.peekUndo() : h.peekRedo();
-      if (!e) return;
+      // 되돌릴 것도 없고 처리 중인 요청도 없으면 할 일이 없다
+      if (!(dir === 'undo' ? h.canUndo() : h.canRedo()) && pendingOps.current === 0) return Promise.resolve();
+      pendingOps.current++;
       setStatus('saving');
-      try {
-        const patch = dir === 'undo' ? e.inverse : e.forward;
-        const res: any = await mutate({ op: 'patch', patch, expect: e.expect });
-        commit(res.snapshot);
-        if (res.conflict) {
-          if (dir === 'undo') h.dropUndo();
-          else h.dropRedo();
-          showToast(
-            res.reason === 'file'
-              ? '보관 기간이 지나 파일이 정리되어 복원할 수 없어요. 이 단계는 건너뛰었어요.'
-              : '다른 탭에서 바뀐 내용이라 덮어쓰지 않고 이 단계를 건너뛰었어요.',
-          );
-          setStatus('idle');
-        } else {
-          if (dir === 'undo') h.commitUndo(res.touched);
-          else h.commitRedo(res.touched);
-          const target = boardOfPatch(patch, res.snapshot as Snapshot);
-          if (target && (res.snapshot as Snapshot).boards.some((b) => b.id === target)) setBoardId(target);
-          setStatus('saved');
+      return enqueue(async () => {
+        // 앞선 요청이 모두 끝난 "내 차례"에 이력의 맨 위 항목을 고른다 (빠르게 여러 번 눌러도 하나씩 차례로)
+        const e = dir === 'undo' ? h.peekUndo() : h.peekRedo();
+        if (!e) {
+          settle('idle');
+          return;
         }
-      } catch (err) {
-        setStatus('error');
-        showToast((err as Error).message);
-      }
-      bump((n) => n + 1);
+        const before = baseRef.current;
+        try {
+          const patch = dir === 'undo' ? e.inverse : e.forward;
+          const res: any = await mutate({ op: 'patch', patch, expect: e.expect });
+          commit(res.snapshot);
+          if (res.conflict) {
+            if (dir === 'undo') h.dropUndo(e);
+            else h.dropRedo(e);
+            showToast(
+              res.reason === 'file'
+                ? '보관 기간이 지나 파일이 정리되어 복원할 수 없어요. 이 단계는 건너뛰었어요.'
+                : '다른 탭에서 바뀐 내용이라 덮어쓰지 않고 이 단계를 건너뛰었어요.',
+            );
+            settle('idle');
+          } else {
+            if (dir === 'undo') h.commitUndo(res.touched, e);
+            else h.commitRedo(res.touched, e);
+            const after = res.snapshot as Snapshot;
+            const target = boardOfPatch(patch, before, after);
+            if (target && after.boards.some((b) => b.id === target)) setBoardId(target);
+            settle('saved');
+          }
+        } catch (err) {
+          settle('error');
+          showToast((err as Error).message);
+        }
+      });
     },
-    [showToast, commit],
+    [enqueue, commit, settle, showToast],
   );
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
-      if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== 'z') return;
+      // 한글 입력 상태에서는 key 값이 'ㅋ'처럼 올 수 있어 실제 키 위치(code)도 함께 본다
+      if (!(ev.ctrlKey || ev.metaKey) || (ev.key.toLowerCase() !== 'z' && ev.code !== 'KeyZ')) return;
       if (isTyping(ev.target)) return; // 글 입력 중에는 입력창 자체의 되돌리기를 쓴다
       ev.preventDefault();
-      step(ev.shiftKey ? 'redo' : 'undo');
+      void step(ev.shiftKey ? 'redo' : 'undo');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -388,8 +488,10 @@ export function App() {
       if (!c.assignee) continue;
       if (scope === 'all' || colIds.has(c.columnId)) set.add(c.assignee);
     }
+    // 다른 보드에서 고른 담당자도 목록에 남겨 둔다 (여기서도 체크를 풀 수 있게)
+    for (const a of filters.assignees) set.add(a);
     return [...set].sort();
-  }, [snap, scope, colIds]);
+  }, [snap, scope, colIds, filters.assignees]);
 
   const notices = useMemo(() => (snap ? computeNotices(snap, today) : []), [snap, today]);
 
@@ -408,7 +510,7 @@ export function App() {
   useEffect(() => {
     if (openCardId && snap && !cardById.has(openCardId)) {
       setOpenCardId(null);
-      showToast('이 카드는 다른 탭에서 삭제되었어요.');
+      showToast('열어 둔 카드가 삭제되어 창을 닫았어요.');
     }
   }, [openCardId, snap, cardById, showToast]);
 
@@ -416,25 +518,30 @@ export function App() {
 
   const browserSupported = typeof Notification !== 'undefined';
   useEffect(() => {
-    if (!browserOn || !browserSupported || Notification.permission !== 'granted') return;
-    const read = (): string[] => {
+    if (!browserOn || !browserSupported || Notification.permission !== 'granted' || notices.length === 0) return;
+    const show = () => {
+      let shown: string[];
       try {
-        return (JSON.parse(store(NOTIFIED_KEY) ?? '[]') as string[]).filter((k) => k.endsWith(`|${today}`));
+        shown = (JSON.parse(store(NOTIFIED_KEY) ?? '[]') as string[]).filter((k) => k.endsWith(`|${today}`));
       } catch {
-        return [];
+        shown = [];
+      }
+      for (const n of notices) {
+        const k = `${n.cardId}|${n.kind}|${n.dueDate}|${today}`;
+        if (shown.includes(k)) continue;
+        shown = [...shown, k];
+        storeSet(NOTIFIED_KEY, JSON.stringify(shown));
+        try {
+          new Notification(`${NOTICE_TEXT[n.kind]}: ${n.title}`, { body: `${n.boardName} · 마감 ${n.dueDate}` });
+        } catch {
+          /* 알림을 못 띄워도 앱은 계속 동작한다 */
+        }
       }
     };
-    for (const n of notices) {
-      const k = `${n.cardId}|${n.kind}|${n.dueDate}|${today}`;
-      const cur = read(); // 표시 직전에 다시 확인 (다른 탭이 먼저 보여줬을 수 있다)
-      if (cur.includes(k)) continue;
-      storeSet(NOTIFIED_KEY, JSON.stringify([...cur, k]));
-      try {
-        new Notification(`${NOTICE_TEXT[n.kind]}: ${n.title}`, { body: `${n.boardName} · 마감 ${n.dueDate}` });
-      } catch {
-        /* 알림을 못 띄워도 앱은 계속 동작한다 */
-      }
-    }
+    // 여러 탭이 같은 변경을 동시에 받아도 한 번만 알리도록, 탭끼리 차례를 정하는 잠금 안에서 확인·기록·표시한다
+    const locks = (navigator as Navigator & { locks?: { request: (name: string, cb: () => unknown) => Promise<unknown> } }).locks;
+    if (locks?.request) locks.request('kanban:notify', show).catch(show);
+    else show();
   }, [notices, browserOn, browserSupported, today]);
 
   const toggleBrowser = async () => {
@@ -454,7 +561,11 @@ export function App() {
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    // 스페이스로 끌기 시작, Enter는 카드 열기에 쓴다 (끄는 중에는 스페이스·Enter로 놓기, Esc로 취소)
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+      keyboardCodes: { start: ['Space'], cancel: ['Escape'], end: ['Space', 'Enter', 'Tab'] },
+    }),
   );
   const findContainer = (id: string, it: Items) => (id.startsWith('col:') ? id.slice(4) : Object.keys(it).find((k) => it[k].includes(id)));
 
@@ -462,6 +573,7 @@ export function App() {
     const id = String(e.active.id);
     const col = findContainer(id, shownBase);
     if (col) dragOrigin.current = { columnId: col, index: shownBase[col].indexOf(id) };
+    dragMoved.current = false;
     setActiveId(id);
     setDragItems(shownBase);
   };
@@ -508,21 +620,38 @@ export function App() {
     }
     const index = final[ac].indexOf(aid);
     if (origin.columnId === ac && origin.index === index) return;
-    run({ op: 'moveCard', id: aid, toColumnId: ac, index }, (s) => ({
-      ...s,
-      cards: s.cards.map((c) => {
-        for (const colId of Object.keys(final)) {
-          const i = final[colId].indexOf(c.id);
-          if (i >= 0) return { ...c, columnId: colId, position: i };
-        }
-        return c;
-      }),
-    }));
+    const order = final[ac];
+    // 응답이 올 때까지 옮긴 카드 하나만 새 자리에 보여 준다 (실패하면 이 카드만 제자리로 돌아감)
+    void run({ op: 'moveCard', id: aid, toColumnId: ac, index }, (s) => ({ ...s, cards: placeCard(s.cards, aid, ac, order[index - 1], order[index + 1]) }));
   };
   const onDragCancel = () => {
     setDragItems(null);
     setActiveId(null);
     dragOrigin.current = null;
+  };
+
+  // 화면 읽기 프로그램용 안내 (카드 제목과 열 이름으로 알려 준다)
+  const titleOf = (id: UniqueIdentifier) => cardById.get(String(id))?.title ?? '카드';
+  const colNameOf = (id: UniqueIdentifier | undefined) => {
+    if (id === undefined) return null;
+    const key = String(id);
+    const colId = key.startsWith('col:') ? key.slice(4) : findContainer(key, dragItemsRef.current ?? shownBase);
+    return columns.find((c) => c.id === colId)?.name ?? null;
+  };
+  const announcements: Announcements = {
+    onDragStart: ({ active }) => `"${titleOf(active.id)}" 카드를 집었어요.`,
+    onDragOver: ({ active, over }) => {
+      // 막 집은 순간(자기 자리 위)에는 "집었어요" 안내를 덮어쓰지 않는다
+      if (over && String(over.id) === String(active.id) && !dragMoved.current) return undefined;
+      dragMoved.current = true;
+      const c = colNameOf(over?.id);
+      return c ? `"${titleOf(active.id)}" 카드가 "${c}" 열 위에 있어요.` : `"${titleOf(active.id)}" 카드가 놓을 수 있는 곳 밖에 있어요.`;
+    },
+    onDragEnd: ({ active, over }) => {
+      const c = colNameOf(over?.id);
+      return c ? `"${titleOf(active.id)}" 카드를 "${c}" 열에 놓았어요.` : `"${titleOf(active.id)}" 카드를 제자리에 두었어요.`;
+    },
+    onDragCancel: ({ active }) => `"${titleOf(active.id)}" 카드 옮기기를 취소했어요.`,
   };
 
   // ───────── 동작 모음 ─────────
@@ -561,9 +690,13 @@ export function App() {
     return s ? [...s.boards].sort((a, b) => a.position - b.position).at(-1) : undefined;
   };
 
+  /** 카드를 다른 열의 맨 끝으로 옮긴다 (응답 전에도 화면에서 바로 옮겨 보인다) */
+  const moveToEnd = (cardId: string, toColumnId: string) =>
+    run({ op: 'moveCard', id: cardId, toColumnId, index: 9999 }, (s) => ({ ...s, cards: placeCard(s.cards, cardId, toColumnId) }));
+
   const cardActions = {
     onOpen: setOpenCardId,
-    onMoveTo: (cardId: string, toColumnId: string) => run({ op: 'moveCard', id: cardId, toColumnId, index: 9999 }),
+    onMoveTo: (cardId: string, toColumnId: string) => void moveToEnd(cardId, toColumnId),
     onDelete: (c: Card) => confirmDeleteCard(c),
     onDuplicate: (c: Card) => run({ op: 'duplicateCard', id: c.id }),
     onArchive: (c: Card) => run({ op: 'setArchived', ids: [c.id], archived: true }),
@@ -583,7 +716,7 @@ export function App() {
 
   // ───────── 그리기 ─────────
 
-  if (loadError) {
+  if (loadError && !snap) {
     return (
       <div className="center">
         <p>데이터를 불러오지 못했어요.</p>
@@ -615,9 +748,14 @@ export function App() {
                   initial={b.name}
                   max={LIMITS.boardName}
                   label="보드 이름"
-                  onSave={(v) => {
-                    setRenamingBoard(null);
-                    if (v !== b.name) run({ op: 'renameBoard', id: b.id, name: v });
+                  onSave={async (v) => {
+                    if (v === b.name) {
+                      setRenamingBoard(null);
+                      return true;
+                    }
+                    const ok = await run({ op: 'renameBoard', id: b.id, name: v });
+                    if (ok) setRenamingBoard(null);
+                    return ok; // 실패하면 쓴 이름을 남겨 두고 다시 고칠 수 있게 한다
                   }}
                   onCancel={() => setRenamingBoard(null)}
                 />
@@ -661,11 +799,13 @@ export function App() {
             max={LIMITS.boardName}
             label="새 보드 이름"
             onSave={async (v) => {
-              setCreatingBoard(false);
-              if (await run({ op: 'createBoard', name: v })) {
+              const ok = await run({ op: 'createBoard', name: v });
+              if (ok) {
+                setCreatingBoard(false);
                 const nb = newestBoard();
                 if (nb) setBoardId(nb.id);
               }
+              return ok;
             }}
             onCancel={() => setCreatingBoard(false)}
           />
@@ -688,10 +828,10 @@ export function App() {
             {status === 'saved' && '저장됨'}
             {status === 'error' && '저장 실패'}
           </span>
-          <button onClick={() => step('undo')} disabled={!h.canUndo()} title="되돌리기 (Ctrl+Z)" aria-label="되돌리기">
+          <button onClick={() => void step('undo')} disabled={!h.canUndo()} title="되돌리기 (Ctrl+Z)" aria-label="되돌리기">
             ↶ 되돌리기
           </button>
-          <button onClick={() => step('redo')} disabled={!h.canRedo()} title="다시 실행 (Ctrl+Shift+Z)" aria-label="다시 실행">
+          <button onClick={() => void step('redo')} disabled={!h.canRedo()} title="다시 실행 (Ctrl+Shift+Z)" aria-label="다시 실행">
             ↷ 다시 실행
           </button>
           <Bell
@@ -838,9 +978,21 @@ export function App() {
             onOpen={setOpenCardId}
           />
         ) : (
-          <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCorners}
+            onDragStart={onDragStart}
+            onDragOver={onDragOver}
+            onDragEnd={onDragEnd}
+            onDragCancel={onDragCancel}
+            accessibility={{ announcements, screenReaderInstructions: { draggable: DRAG_HELP } }}
+          >
+            {filtered && (
+              <div className="filter-note" role="status">
+                필터를 쓰는 동안에는 카드를 끌어서 옮길 수 없어요. 카드 메뉴(⋯)나 카드 안의 ‘소속 열’로 옮겨 주세요.
+              </div>
+            )}
             <div className="columns">
-              {filtered && <div className="filter-note" role="status">필터를 쓰는 동안에는 카드를 끌어서 옮길 수 없어요. 카드 메뉴(⋯)나 카드 안의 ‘소속 열’로 옮겨 주세요.</div>}
               {columns.map((col, i) => (
                 <ColumnView
                   key={col.id}
@@ -867,7 +1019,7 @@ export function App() {
                   actions={cardActions}
                 />
               ))}
-              <AddColumn onAdd={(name) => board && run({ op: 'addColumn', boardId: board.id, name })} />
+              <AddColumn onAdd={(name) => (board ? run({ op: 'addColumn', boardId: board.id, name }) : Promise.resolve(false))} />
             </div>
             <DragOverlay>
               {activeCard ? <CardFace card={activeCard} overdue={isOverdue(activeCard, columns.find((c) => c.id === activeCard.columnId), today)} meta={metaOf(activeCard.id)} /> : null}
@@ -935,7 +1087,7 @@ export function App() {
             if (ok && fields.dueDate === null && openCard.repeat !== 'none') showToast('마감일이 없어서 반복을 "없음"으로 바꿨어요.');
             return ok;
           }}
-          onMoveTo={(toColumnId) => run({ op: 'moveCard', id: openCard.id, toColumnId, index: 9999 })}
+          onMoveTo={(toColumnId) => moveToEnd(openCard.id, toColumnId)}
           act={run}
           onUpload={(file) => doUpload(openCard.id, file)}
           onDelete={() => confirmDeleteCard(openCard)}

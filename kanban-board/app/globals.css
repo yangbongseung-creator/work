@@ -508,9 +508,9 @@ button.link.danger { color: var(--danger); }
 .check-opt input { width: auto; }
 .menu-pop.left { left: 0; right: auto; }
 .theme-select { width: auto; }
-.filter-note { flex: 0 0 100%; color: var(--muted); font-size: 12px; margin-bottom: -4px; }
-.columns { flex-wrap: nowrap; }
-.filter-note + .column { margin-left: 0; }
+/* 필터 안내는 열 목록 위에 따로 둔다 (열 줄 안에 두면 열들이 화면 밖으로 밀려남) */
+.filter-note { color: var(--muted); font-size: 12px; padding: 8px 16px 0; }
+.multiline { white-space: pre-line; }
 
 .conn { font-size: 12px; color: var(--muted); }
 .conn.connected { color: var(--ok); }

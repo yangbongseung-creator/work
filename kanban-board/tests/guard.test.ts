@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { checkRequest } from '../lib/guard';
+import { afterEach } from 'vitest';
+import path from 'node:path';
+import { allowedPorts, checkRequest } from '../lib/guard';
+import { uploadsDir } from '../lib/server';
 
 const h = (o: Record<string, string>) => ({ get: (k: string) => o[k.toLowerCase()] ?? null });
 const ports = [3000];
@@ -81,5 +84,53 @@ describe('로컬 서버 보호', () => {
     for (const method of ['PUT', 'PATCH', 'DELETE']) {
       expect(checkRequest({ method, headers: h({ host: '127.0.0.1:3000', 'content-type': 'application/json' }) }, ports).ok, method).toBe(false);
     }
+  });
+
+  describe('KANBAN_ALLOWED_PORTS 값 읽기', () => {
+    const saved = process.env.KANBAN_ALLOWED_PORTS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.KANBAN_ALLOWED_PORTS;
+      else process.env.KANBAN_ALLOWED_PORTS = saved;
+    });
+    it('적지 않았거나, 비었거나, 숫자가 아니면 기본값 3000 (모든 요청이 막히지 않게)', () => {
+      for (const v of [undefined, '', '   ', 'abc', ',', '0', '-1', '70000']) {
+        if (v === undefined) delete process.env.KANBAN_ALLOWED_PORTS;
+        else process.env.KANBAN_ALLOWED_PORTS = v;
+        expect(allowedPorts(), `값=${JSON.stringify(v)}`).toEqual([3000]);
+      }
+    });
+    it('쉼표로 여러 개, 앞뒤 공백 허용, 이상한 값은 빼고 읽는다', () => {
+      process.env.KANBAN_ALLOWED_PORTS = ' 3000 , 8080,abc ';
+      expect(allowedPorts()).toEqual([3000, 8080]);
+      process.env.KANBAN_ALLOWED_PORTS = '8080';
+      expect(allowedPorts()).toEqual([8080]);
+    });
+  });
+
+  describe('KANBAN_UPLOADS 값 읽기', () => {
+    const saved = process.env.KANBAN_UPLOADS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.KANBAN_UPLOADS;
+      else process.env.KANBAN_UPLOADS = saved;
+    });
+    it('적지 않았거나 비어 있으면 앱 폴더 아래 data/uploads, 적었으면 그 폴더', () => {
+      const def = path.join(process.cwd(), 'data', 'uploads');
+      for (const v of [undefined, '', '   ']) {
+        if (v === undefined) delete process.env.KANBAN_UPLOADS;
+        else process.env.KANBAN_UPLOADS = v;
+        expect(uploadsDir(), `값=${JSON.stringify(v)}`).toBe(def);
+      }
+      process.env.KANBAN_UPLOADS = ' /srv/kanban/uploads ';
+      expect(uploadsDir()).toBe('/srv/kanban/uploads');
+    });
+  });
+
+  it('막혔을 때 무엇을 하면 되는지 알려준다 (포트가 다를 때·주소가 다를 때)', () => {
+    const port = checkRequest({ method: 'GET', headers: h({ host: '127.0.0.1:8080' }) }, ports);
+    expect(port.ok).toBe(false);
+    if (!port.ok) expect(port.reason).toContain('KANBAN_ALLOWED_PORTS=3000,8080');
+    const ip = checkRequest({ method: 'GET', headers: h({ host: '192.168.0.10:3000' }) }, ports);
+    expect(ip.ok).toBe(false);
+    if (!ip.ok) expect(ip.reason).toContain('SSH 터널');
   });
 });

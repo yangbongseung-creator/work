@@ -5,7 +5,7 @@ import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { LIMITS, type Card, type Column } from '../lib/types';
-import { InlineEdit, LabelDot, Menu } from './ui';
+import { InlineEdit, LabelDot, Menu, isComposingKey, useEnterSubmit } from './ui';
 import { isOverdue } from './util';
 
 export type CardMeta = { checkDone: number; checkTotal: number; comments: number; attachments: number };
@@ -79,6 +79,12 @@ export function SortableCard(props: {
         className={`card-hit ${props.disabled ? 'no-drag' : ''}`}
         onClick={() => (props.selecting ? props.onToggleSelect(card.id) : actions.onOpen(card.id))}
         onKeyDown={(e) => {
+          // Enter는 카드 열기, 스페이스는 끌기 시작 (끄는 중의 Enter·스페이스는 놓기라서 열지 않는다)
+          if (!props.disabled && e.key === 'Enter' && !isDragging) {
+            e.preventDefault();
+            actions.onOpen(card.id);
+            return;
+          }
           listeners?.onKeyDown?.(e as never);
           if (props.disabled && (e.key === 'Enter' || e.key === ' ')) {
             e.preventDefault();
@@ -86,6 +92,7 @@ export function SortableCard(props: {
             else actions.onOpen(card.id);
           }
         }}
+        aria-pressed={props.selecting ? props.selected : undefined}
         aria-label={`카드: ${card.title}`}
       >
         <CardFace card={card} overdue={props.overdue} meta={props.meta} selecting={props.selecting} selected={props.selected} />
@@ -129,7 +136,7 @@ export function ColumnView(props: {
   selecting: boolean;
   selected: Set<string>;
   onToggleSelect: (id: string) => void;
-  onRename: (name: string) => void;
+  onRename: (name: string) => Promise<boolean>;
   onDelete: () => void;
   onMove: (dir: -1 | 1) => void;
   onToggleDone: () => void;
@@ -142,12 +149,17 @@ export function ColumnView(props: {
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState('');
 
-  const submit = async () => {
-    const t = title.trim();
+  const submit = async (value: string) => {
+    const t = value.trim();
     if (!t) return;
     setTitle('');
-    await props.onAddCard(t);
+    if (!(await props.onAddCard(t))) {
+      // 저장 실패: 쓴 제목을 되살려 다시 시도할 수 있게 한다 (그 사이 새로 쓴 글이 있으면 그대로 둔다)
+      setTitle((cur) => (cur.trim() ? cur : t));
+      setAdding(true);
+    }
   };
+  const enter = useEnterSubmit((value) => void submit(value), { shiftForNewline: true });
 
   return (
     <section className={`column ${col.isDone ? 'done' : ''} ${isOver ? 'over' : ''}`} aria-label={`${col.name} 열`}>
@@ -157,9 +169,14 @@ export function ColumnView(props: {
             initial={col.name}
             max={LIMITS.columnName}
             label="열 이름"
-            onSave={(v) => {
-              setRenaming(false);
-              if (v !== col.name) props.onRename(v);
+            onSave={async (v) => {
+              if (v === col.name) {
+                setRenaming(false);
+                return true;
+              }
+              const ok = await props.onRename(v);
+              if (ok) setRenaming(false);
+              return ok;
             }}
             onCancel={() => setRenaming(false)}
           />
@@ -224,15 +241,13 @@ export function ColumnView(props: {
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-              if (e.key === 'Escape') {
+              if (enter.onKeyDown(e)) return; // 한글 조합 중 Enter는 확정용이라 제출하지 않는다
+              if (e.key === 'Escape' && !isComposingKey(e)) {
                 setAdding(false);
                 setTitle('');
               }
             }}
+            onCompositionEnd={enter.onCompositionEnd}
             onBlur={() => {
               if (!title.trim()) setAdding(false);
             }}
@@ -247,7 +262,7 @@ export function ColumnView(props: {
   );
 }
 
-export function AddColumn({ onAdd }: { onAdd: (name: string) => void }) {
+export function AddColumn({ onAdd }: { onAdd: (name: string) => Promise<boolean> }) {
   const [adding, setAdding] = useState(false);
   return (
     <div className="add-column">
@@ -256,9 +271,10 @@ export function AddColumn({ onAdd }: { onAdd: (name: string) => void }) {
           initial=""
           max={LIMITS.columnName}
           label="열 이름"
-          onSave={(v) => {
-            setAdding(false);
-            onAdd(v);
+          onSave={async (v) => {
+            const ok = await onAdd(v);
+            if (ok) setAdding(false);
+            return ok;
           }}
           onCancel={() => setAdding(false)}
         />
