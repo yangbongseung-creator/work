@@ -173,6 +173,10 @@ function capIds(ids: string[]) {
 type Plan = { cardId: string; newId: string; checkIds: string[]; colId: string; due: string; repeat: Repeat };
 type Ctx = { client: PoolClient; after: (() => void)[] };
 
+/**
+ * 표 만들기. 표 구조를 바꾸면 sql/schema.sql(표·칸 설명이 들어 있는 스크립트)도 함께 고쳐야 한다.
+ * tests/sql-schema.test.ts 가 두 구조가 똑같은지 자동으로 확인한다.
+ */
 const DDL = `
   CREATE TABLE IF NOT EXISTS app_settings (key text PRIMARY KEY, value text NOT NULL);
   CREATE TABLE IF NOT EXISTS meta (id integer PRIMARY KEY CHECK (id = 1), revision integer NOT NULL);

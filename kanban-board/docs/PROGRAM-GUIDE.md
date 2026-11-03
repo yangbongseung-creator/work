@@ -78,6 +78,7 @@ kanban-board/
 ├─ lib/                 서버·공용 로직
 ├─ deploy/              서버 운영 스크립트 (8장)
 ├─ docs/                설명서 (이 파일 포함)
+├─ sql/                 데이터베이스 구조 스크립트 (schema.sql: 표·칸마다 한국어 설명)
 ├─ tests/               자동 시험 (10장)
 ├─ .env.example         설정 파일 견본
 └─ package.json         부품 목록과 명령 (dev, build, start, test)
@@ -142,6 +143,8 @@ erDiagram
 - 모든 행에는 `rev`(그 행의 변경 번호)가 있어서, 되돌리기가 "그 사이 누가 바꿨는지"를 알아볼 수 있습니다.
 - 날짜는 `YYYY-MM-DD` 글자로 저장합니다 (시간대 영향을 받지 않게).
 - 표와 인덱스는 앱이 처음 DB에 붙을 때 **자동으로 만듭니다** (이미 있으면 그대로 둠). `DATABASE_SCHEMA`로 다른 스키마를 쓸 수 있습니다.
+- 모든 칸의 자세한 설명은 **[`sql/schema.sql`](../sql/schema.sql)** 에 있습니다. 이 스크립트를 `kanban` 계정으로 한 번 실행하면 데이터베이스 안에도 표·칸 설명이 기록되어, DBeaver 같은 프로그램에서 표나 칸을 누르면 한국어 설명이 보입니다 (데이터는 바뀌지 않고, 여러 번 실행해도 안전).
+- 표 구조를 바꿀 때는 `lib/repository.ts`와 `sql/schema.sql`을 함께 고칩니다. `tests/sql-schema.test.ts`가 두 구조가 똑같은지 확인합니다.
 
 ## 5. 서버 API
 
@@ -356,8 +359,9 @@ npm test
 | `guard.test.ts` | 15 | 보안 검사, 설정 값(`KANBAN_ALLOWED_PORTS`, `KANBAN_UPLOADS`) 읽기 |
 | `lib.test.ts` | 27 | 날짜 계산, 검색·필터, 마감일 보기, 알림 계산, 첨부 검사, 변경 합치기 |
 | `fuzz.test.ts` | 1 | 무작위 작업을 섞어 실행해도 데이터가 망가지지 않고, 전부 되돌리면 처음으로 돌아오는지 |
+| `sql-schema.test.ts` | 3 | `sql/schema.sql`이 앱이 만드는 표 구조와 똑같은지, 모든 표·칸에 설명이 들어가는지, 쓰던 DB에 실행해도 데이터가 그대로인지 |
 
-모두 165개입니다.
+모두 168개입니다.
 
 더 크게 무작위 시험을 하려면:
 
